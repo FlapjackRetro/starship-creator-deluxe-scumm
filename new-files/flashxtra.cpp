@@ -851,8 +851,14 @@ FlashXtraCastMember::FlashXtraCastMember(Cast *cast, uint16 castId, XtraCastMemb
 			return (int)((xd[idx * 4] << 24) | (xd[idx * 4 + 1] << 16) | (xd[idx * 4 + 2] << 8) | xd[idx * 4 + 3]);
 		};
 		(void)rdf;
-		_regY = (float)rdi(9);
-		_regX = (float)rdi(10);
+		if (rdi(8) == 1 && rdi(13) > 0 && rdi(14) > 0) {
+			// registration at the center of the member (160,120 is just Flash's placeholder)
+			_regX = rdi(14) / 2.0f;
+			_regY = rdi(13) / 2.0f;
+		} else {
+			_regY = (float)rdi(9);
+			_regX = (float)rdi(10);
+		}
 		_viewH = _regX;
 		_viewV = _regY;
 	}
@@ -934,28 +940,25 @@ Graphics::MacWidget *FlashXtraCastMember::createWidget(Common::Rect &bbox, Chann
 		return widget;
 	}
 
+	debugC(3, kDebugImages, "flash cast %d init %dx%d stage %dx%d reg %g,%g bbox %d,%d %dx%d ch=%d", _castId, _initialRect.width(), _initialRect.height(), stageW(), stageH(), _regX,_regY, bbox.left, bbox.top, bbox.width(), bbox.height(), channel && channel->_sprite ? (int)channel->_sprite->_castId.member : -1);
 	Common::Array<byte> rgba;
-	if (_viewSet) {
-		FlashXtra::SWFMovie::Matrix m;
-		float s = _viewScale / 100.0f;
-		float rx = bbox.width() / (float)MAX((int16)1, _initialRect.width());
-		float ry = bbox.height() / (float)MAX((int16)1, _initialRect.height());
-		m.a = s * rx / 20.0f;
-		m.d = s * ry / 20.0f;
-		m.tx = _regX * rx - _viewH * s * rx;
-		m.ty = _regY * ry - _viewV * s * ry;
-		debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %dx%d view (%g,%g) scale %g", _castId, bbox.width(), bbox.height(), _viewH, _viewV, _viewScale);
-		_movie.render(_frame, bbox.width(), bbox.height(), rgba, &m);
-	} else {
-		if (channel && g_director->getCurrentMovie() && g_director->getCurrentMovie()->getScore()) {
-			Score *sc = g_director->getCurrentMovie()->getScore();
-			for (uint i = 0; i < sc->_channels.size(); i++)
-				if (sc->_channels[i] == channel)
-					debugC(3, kDebugImages, "FlashXtraCastMember: cast %d is channel %d ink %d", _castId, i, channel->_sprite->_ink);
-		}
-		debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %d,%d %dx%d fit frame %d ch %d vis %d", _castId, bbox.left, bbox.top, bbox.width(), bbox.height(), _frame, channel ? (int)channel->_sprite->_castId.member : -1, channel ? channel->_visible : -1);
-		_movie.render(_frame, bbox.width(), bbox.height(), rgba);
-	}
+	// Flash sprites default to scaleMode #showAll: content keeps its aspect
+	// ratio and is centered in the sprite rect.
+	float iw = (float)MAX((int16)1, stageW());
+	float ih = (float)MAX((int16)1, stageH());
+	float r = MIN(bbox.width() / iw, bbox.height() / ih);
+	float ox = (bbox.width() - iw * r) / 2.0f;
+	float oy = (bbox.height() - ih * r) / 2.0f;
+	FlashXtra::SWFMovie::Matrix m;
+	float s = _viewSet ? 100.0f / MAX(_viewScale, 1.0f) : 1.0f;
+	float vh = _viewSet ? _viewH : _regX;
+	float vv = _viewSet ? _viewV : _regY;
+	m.a = s * r / 20.0f;
+	m.d = s * r / 20.0f;
+	m.tx = ox + _regX * r - vh * s * r;
+	m.ty = oy + _regY * r - vv * s * r;
+	debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %dx%d view (%g,%g) scale %g", _castId, bbox.width(), bbox.height(), vh, vv, s);
+	_movie.render(_frame, bbox.width(), bbox.height(), rgba, &m);
 
 	delete _mask;
 	_mask = new Graphics::ManagedSurface(bbox.width(), bbox.height(), Graphics::PixelFormat::createFormatCLUT8());
@@ -1003,6 +1006,7 @@ bool FlashXtraCastMember::hasField(int field) {
 	case kTheOriginMode:
 	case kTheStatic:
 	case kTheImageEnabled:
+	case kTheRegPoint:
 		return true;
 	default:
 		break;
@@ -1045,6 +1049,12 @@ Datum FlashXtraCastMember::getField(int field) {
 	case kTheImageEnabled:
 		d = 1;
 		break;
+	case kTheRegPoint:
+		d.type = POINT;
+		d.u.farr = new FArray;
+		d.u.farr->arr.push_back((double)_regX);
+		d.u.farr->arr.push_back((double)_regY);
+		break;
 	default:
 		d = CastMember::getField(field);
 		break;
@@ -1056,6 +1066,16 @@ Datum FlashXtraCastMember::getField(int field) {
 void FlashXtraCastMember::setField(int field, const Datum &d) {
 	debugC(3, kDebugImages, "FlashXtraCastMember::setField(%d) cast %d = %s", field, _castId, d.asString(true).c_str());
 	switch (field) {
+	case kTheRegPoint:
+		if (d.type == POINT && d.u.farr->arr.size() >= 2) {
+			Score *score = g_director->getCurrentMovie()->getScore();
+			if (score)
+				score->invalidateRectsForMember(this);
+			_regX = (float)d.u.farr->arr[0].asFloat();
+			_regY = (float)d.u.farr->arr[1].asFloat();
+			setModified(true);
+		}
+		return;
 	case kTheFrame:
 		_frame = MAX(0, d.asInt() - 1);
 		setModified(true);
@@ -1100,7 +1120,7 @@ void FlashXtraCastMember::setField(int field, const Datum &d) {
 // Convert between stage and Flash movie coordinates for a sprite displaying this member.
 // bbox: the sprite's on-stage rectangle.
 void FlashXtraCastMember::stageToFlash(const Common::Rect &bbox, float sx, float sy, float &fx, float &fy) {
-	float s = MAX(_viewScale, 1.0f) / 100.0f;
+	float s = 100.0f / MAX(_viewScale, 1.0f);
 	float rx = bbox.width() / (float)MAX((int16)1, _initialRect.width());
 	float ry = bbox.height() / (float)MAX((int16)1, _initialRect.height());
 	float dx = sx - bbox.left, dy = sy - bbox.top;
@@ -1109,7 +1129,7 @@ void FlashXtraCastMember::stageToFlash(const Common::Rect &bbox, float sx, float
 }
 
 void FlashXtraCastMember::flashToStage(const Common::Rect &bbox, float fx, float fy, float &sx, float &sy) {
-	float s = MAX(_viewScale, 1.0f) / 100.0f;
+	float s = 100.0f / MAX(_viewScale, 1.0f);
 	float rx = bbox.width() / (float)MAX((int16)1, _initialRect.width());
 	float ry = bbox.height() / (float)MAX((int16)1, _initialRect.height());
 	sx = bbox.left + (_regX + (fx - _viewH) * s) * rx;

@@ -7,7 +7,8 @@
 - Status: open, not yet investigated.
 
 ## Systems screen (open)
-- Defiant: layers not sharing zoom/offset, stray orange nacelle icon, part picture offset from box.
+- (fixed in v12) Z buttons reversed, part picture offset from box, naming-text rotation.
+- Still check: other classes' alignment, Defiant cutaway scale vs original.
 - Resource Budget value and hull-name text blank/wrong.
 - Menus displaced from start position after use.
 

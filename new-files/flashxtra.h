@@ -142,7 +142,14 @@ public:
 	void load() override;
 	Graphics::ManagedSurface *getFlashMask() override { return _mask; }
 	Common::Point getRegistrationOffset() override { return Common::Point((int)_regX, (int)_regY); }
-	Common::Point getRegistrationOffset(int16 w, int16 h) override { return Common::Point((int)(_regX * w / MAX((int16)1, _initialRect.width())), (int)(_regY * h / MAX((int16)1, _initialRect.height()))); }
+	Common::Point getRegistrationOffset(int16 w, int16 h) override {
+		float iw = (float)MAX((int16)1, stageW()), ih = (float)MAX((int16)1, stageH());
+		float r = MIN(w / iw, h / ih);
+		return Common::Point((int)((w - iw * r) / 2.0f + _regX * r), (int)((h - ih * r) / 2.0f + _regY * r));
+	}
+
+	int16 stageW() { load(); int16 w = _movie.getStageRect().width(); return w > 0 ? w : _initialRect.width(); }
+	int16 stageH() { load(); int16 h = _movie.getStageRect().height(); return h > 0 ? h : _initialRect.height(); }
 
 	Graphics::MacWidget *createWidget(Common::Rect &bbox, Channel *channel, SpriteType spriteType) override;
 
