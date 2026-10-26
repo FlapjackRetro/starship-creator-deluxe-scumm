@@ -1025,17 +1025,17 @@ Datum FlashXtraCastMember::getField(int field) {
 	case kTheViewPoint:
 		d.type = POINT;
 		d.u.farr = new FArray;
-		d.u.farr->arr.push_back((int)_viewH);
-		d.u.farr->arr.push_back((int)_viewV);
+		d.u.farr->arr.push_back(Datum((double)_viewH));
+		d.u.farr->arr.push_back(Datum((double)_viewV));
 		break;
 	case kTheViewH:
-		d = (int)_viewH;
+		d = (double)_viewH;
 		break;
 	case kTheViewV:
-		d = (int)_viewV;
+		d = (double)_viewV;
 		break;
 	case kTheViewScale:
-		d = (int)_viewScale;
+		d = (double)_viewScale;
 		break;
 	case kTheOriginMode:
 		d = Common::String(_originCenter ? "center" : "topLeft");
@@ -1095,6 +1095,25 @@ void FlashXtraCastMember::setField(int field, const Datum &d) {
 	}
 
 	CastMember::setField(field, d);
+}
+
+// Convert between stage and Flash movie coordinates for a sprite displaying this member.
+// bbox: the sprite's on-stage rectangle.
+void FlashXtraCastMember::stageToFlash(const Common::Rect &bbox, float sx, float sy, float &fx, float &fy) {
+	float s = MAX(_viewScale, 1.0f) / 100.0f;
+	float rx = bbox.width() / (float)MAX((int16)1, _initialRect.width());
+	float ry = bbox.height() / (float)MAX((int16)1, _initialRect.height());
+	float dx = sx - bbox.left, dy = sy - bbox.top;
+	fx = _viewH + (dx / rx - _regX) / s;
+	fy = _viewV + (dy / ry - _regY) / s;
+}
+
+void FlashXtraCastMember::flashToStage(const Common::Rect &bbox, float fx, float fy, float &sx, float &sy) {
+	float s = MAX(_viewScale, 1.0f) / 100.0f;
+	float rx = bbox.width() / (float)MAX((int16)1, _initialRect.width());
+	float ry = bbox.height() / (float)MAX((int16)1, _initialRect.height());
+	sx = bbox.left + (_regX + (fx - _viewH) * s) * rx;
+	sy = bbox.top + (_regY + (fy - _viewV) * s) * ry;
 }
 
 Common::String FlashXtraCastMember::formatInfo() {

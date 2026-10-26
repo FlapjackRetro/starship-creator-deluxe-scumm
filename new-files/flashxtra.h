@@ -151,6 +151,9 @@ public:
 	void setField(int field, const Datum &value) override;
 
 	Common::String formatInfo() override;
+	bool isFlash() const override { return true; }
+	void stageToFlash(const Common::Rect &bbox, float sx, float sy, float &fx, float &fy);
+	void flashToStage(const Common::Rect &bbox, float fx, float fy, float &sx, float &sy);
 
 	FlashXtra::SWFMovie _movie;
 	bool _valid;

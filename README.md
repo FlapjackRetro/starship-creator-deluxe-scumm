@@ -3,7 +3,7 @@
 Work-in-progress port of *Star Trek: Starship Creator Deluxe* (1998, Macromedia Director 5/6) using ScummVM's Director engine, avoiding the bundled QuickTime 3.0.
 
 - Base: ScummVM master @ `2359eb49d56d292117396cb81d41c3fd7171434d`
-- Apply: `cd scummvm && git apply ../patches/director-swa-v10.patch` (full patch; includes the files in `new-files/`)
+- Apply: `cd scummvm && git apply ../patches/director-swa-v11.patch` (full patch; includes the files in `new-files/`)
 - Run from the parent "Starship Creator" dir: `scummvm --start-movie=ShipMain/Creator.dxr director:trekship`
 
 ## Status (patch v10)
