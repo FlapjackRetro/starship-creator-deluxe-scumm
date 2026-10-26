@@ -47,21 +47,22 @@ index 6c928ccb..4bcf566a 100644
  
  			// If it is an external image, use the included palette.
 diff --git a/engines/director/castmember/castmember.h b/engines/director/castmember/castmember.h
-index 88afbd2d..a1457273 100644
+index 88afbd2d..3c927414 100644
 --- a/engines/director/castmember/castmember.h
 +++ b/engines/director/castmember/castmember.h
-@@ -61,6 +61,9 @@ public:
+@@ -61,6 +61,10 @@ public:
  	virtual void unload();
  	bool isLoaded() { return _loaded; }
  
 +	// True for Shockwave Audio streaming members
 +	virtual bool isSWA() const { return false; }
++	virtual Graphics::ManagedSurface *getFlashMask() { return nullptr; }
 +
  	virtual bool isEditable() { return false; }
  	virtual void setEditable(bool editable) {}
  	virtual bool isModified() { return _modified; }
 diff --git a/engines/director/castmember/xtra.cpp b/engines/director/castmember/xtra.cpp
-index a60dd43d..2654ca23 100644
+index a60dd43d..0f3a0116 100644
 --- a/engines/director/castmember/xtra.cpp
 +++ b/engines/director/castmember/xtra.cpp
 @@ -29,7 +29,9 @@
@@ -84,20 +85,20 @@ index a60dd43d..2654ca23 100644
  	{ "font", nullptr },
  	{ nullptr, nullptr },
  };
-@@ -87,7 +91,7 @@ XtraCastMember::XtraCastMember(Cast *cast, uint16 castId, Common::SeekableReadSt
- 	if (debugChannelSet(5, kDebugLoading)) {
- 		Common::hexdump(_xtraData.data(), xtraDataLen);
- 	}
--
-+		warning("DBGFLASH id %d len %d: %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x children %d", castId, (int)_xtraData.size(), _xtraData[0],_xtraData[1],_xtraData[2],_xtraData[3],_xtraData[4],_xtraData[5],_xtraData[6],_xtraData[7],_xtraData[8],_xtraData[9],_xtraData[10],_xtraData[11],_xtraData[12],_xtraData[13],_xtraData[14],_xtraData[15], (int)_children.size());
- 	if (!findXtraCastMemberProto(_xtraSymbol))
- 		warning("STUB: XtraCastMember::XtraCastMember(): Xtra '%s' cast member %d not yet supported for version v%d (%d)",
- 				_xtraSymbol.c_str(), castId, humanVersion(_cast->_version), _cast->_version);
 diff --git a/engines/director/channel.cpp b/engines/director/channel.cpp
-index 8f53c3dc..21c94daf 100644
+index 8f53c3dc..cbf5bea2 100644
 --- a/engines/director/channel.cpp
 +++ b/engines/director/channel.cpp
-@@ -528,6 +528,15 @@ void Channel::setClean(Sprite *nextSprite, bool partial) {
+@@ -157,6 +157,8 @@ DirectorPlotData Channel::getPlotData() {
+ 	}
+ 
+ 	pd.srfMask = nullptr;
++	if (_sprite->_cast && _sprite->_cast->_type == kCastXtra)
++		pd.srfMask = _sprite->_cast->getFlashMask();
+ 	if (_sprite->_cast && _sprite->_cast->_type == kCastText) {
+ 		// kInkTypeCopy -- no mask, default rendering
+ 
+@@ -528,6 +530,15 @@ void Channel::setClean(Sprite *nextSprite, bool partial) {
  		if (_sprite->_puppet || _sprite->_autoPuppet || (!nextSprite->isQDShape() && partial)) {
  			// Updating scripts, etc. does not require a full re-render
  			_sprite->_scriptId = nextSprite->_scriptId;
@@ -482,13 +483,14 @@ index f58d7766..87c4df03 100644
  	}
  }
 diff --git a/engines/director/lingo/lingo-the.cpp b/engines/director/lingo/lingo-the.cpp
-index 1ec91626..09238711 100644
+index 1ec91626..abec25ba 100644
 --- a/engines/director/lingo/lingo-the.cpp
 +++ b/engines/director/lingo/lingo-the.cpp
-@@ -240,6 +240,11 @@ const TheEntityField fields[] = {
+@@ -240,6 +240,12 @@ const TheEntityField fields[] = {
  	{ kTheSprite,	"stretch",		kTheStretch,	200 },// D2 p
  	{ kTheSprite,	"top",			kTheTop,		200 },// D2 p
  	{ kTheSprite,	"trails",		kTheTrails,		300 },//		D3.1 p
++	{ kTheSprite,	"viewPoint",	kTheViewPoint,	600 },
 +	{ kTheSprite,	"viewH",		kTheViewH,		600 },
 +	{ kTheSprite,	"viewV",		kTheViewV,		600 },
 +	{ kTheSprite,	"viewScale",	kTheViewScale,	600 },
@@ -497,7 +499,7 @@ index 1ec91626..09238711 100644
  	{ kTheSprite,	"tweened",		kTheTweened,	600 },//						D6 p
  	{ kTheSprite,	"type",			kTheType,		200 },// D2 p
  	{ kTheSprite,	"visibility",	kTheVisibility,	300 },//		D3.1 p
-@@ -282,6 +287,10 @@ const TheEntityField fields[] = {
+@@ -282,6 +288,10 @@ const TheEntityField fields[] = {
  	{ kTheCast,		"controller",	kTheController,	300 },//		D3.1 p
  	{ kTheCast,		"crop",			kTheCrop,		400 },//				D4 p
  	{ kTheCast,		"digitalVideoType",kTheDigitalVideoType,500 },//			D5 p
@@ -508,7 +510,7 @@ index 1ec91626..09238711 100644
  	{ kTheCast,		"directToStage",kTheDirectToStage,300 },//		D3.1 p
  	{ kTheCast,		"duration",		kTheDuration,	300 },//		D3.1 p
  	{ kTheCast,		"frameRate",	kTheFrameRate,	400 },//				D4 p
-@@ -366,6 +375,11 @@ const TheEntityField fields[] = {
+@@ -366,6 +376,11 @@ const TheEntityField fields[] = {
  	{ kTheCast,		"interface",	kTheInterface,	500 },//					D5 p
  	{ kTheCast,		"mediaBusy",	kTheMediaBusy,	600 },//						D6 p
  
@@ -520,7 +522,7 @@ index 1ec91626..09238711 100644
  	// Behavior (me) fields
  	{ kTheCast,		"spriteNum",	kTheSpriteNum,	600 },//						D6 p
  
-@@ -1764,9 +1778,11 @@ Datum Lingo::getTheSprite(Datum &id1, int field) {
+@@ -1764,9 +1779,11 @@ Datum Lingo::getTheSprite(Datum &id1, int field) {
  		d = (int)(sprite->_colorcode & 0x7);
  		break;
  	case kTheScriptInstanceList:
@@ -535,10 +537,11 @@ index 1ec91626..09238711 100644
  		break;
  	case kTheScriptNum:
  		if (g_director->getVersion() >= 600) {
-@@ -1803,6 +1819,16 @@ Datum Lingo::getTheSprite(Datum &id1, int field) {
+@@ -1803,6 +1820,17 @@ Datum Lingo::getTheSprite(Datum &id1, int field) {
  	case kTheTweened:	// D6
  		d = (sprite->_thickness & kTTweened) ? 1 : 0;
  		break;
++	case kTheViewPoint:
 +	case kTheViewH:
 +	case kTheViewV:
 +	case kTheViewScale:
@@ -552,7 +555,7 @@ index 1ec91626..09238711 100644
  	case kTheVisibility:
  	case kTheVisible:
  		d = (channel->_visible ? 1 : 0);
-@@ -2091,7 +2117,13 @@ void Lingo::setTheSprite(Datum &id1, int field, Datum &d) {
+@@ -2091,7 +2119,13 @@ void Lingo::setTheSprite(Datum &id1, int field, Datum &d) {
  
  		break;
  	case kTheScriptInstanceList:
@@ -567,10 +570,11 @@ index 1ec91626..09238711 100644
  		break;
  	case kTheStartTime:
  		channel->_startTime = d.asInt();
-@@ -2121,6 +2153,16 @@ void Lingo::setTheSprite(Datum &id1, int field, Datum &d) {
+@@ -2121,6 +2155,17 @@ void Lingo::setTheSprite(Datum &id1, int field, Datum &d) {
  			channel->setDirty();
  		}
  		break;
++	case kTheViewPoint:
 +	case kTheViewH:
 +	case kTheViewV:
 +	case kTheViewScale:
@@ -584,7 +588,7 @@ index 1ec91626..09238711 100644
  	case kTheTweened: // D6
  		sprite->_thickness = (sprite->_thickness & ~kTTweened) | ((d.asInt() ? kTTweened : 0));
  		channel->setDirty();
-@@ -2756,6 +2798,9 @@ void Lingo::setObjectProp(Datum &obj, Common::String &propName, Datum &val) {
+@@ -2756,6 +2801,9 @@ void Lingo::setObjectProp(Datum &obj, Common::String &propName, Datum &val) {
  
  		if (member->hasProp(propName)) {
  			member->setProp(propName, val);
@@ -667,10 +671,10 @@ index 8da4c668..a15dab0f 100644
  				return;
 diff --git a/engines/director/lingo/xtras-cast/flashxtra.cpp b/engines/director/lingo/xtras-cast/flashxtra.cpp
 new file mode 100644
-index 00000000..11212c49
+index 00000000..74da071c
 --- /dev/null
 +++ b/engines/director/lingo/xtras-cast/flashxtra.cpp
-@@ -0,0 +1,1069 @@
+@@ -0,0 +1,1104 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -694,6 +698,7 @@ index 00000000..11212c49
 +
 +#include "common/algorithm.h"
 +#include "common/debug.h"
++#include "common/file.h"
 +#include "common/util.h"
 +#include "common/hashmap.h"
 +#include <math.h>
@@ -705,6 +710,9 @@ index 00000000..11212c49
 +#include "director/cast.h"
 +#include "director/castmember/xtra.h"
 +#include "director/channel.h"
++#include "director/score.h"
++#include "director/movie.h"
++#include "director/sprite.h"
 +#include "director/lingo/lingo.h"
 +#include "director/lingo/lingo-the.h"
 +#include "director/lingo/xtras-cast/flashxtra.h"
@@ -1430,7 +1438,7 @@ index 00000000..11212c49
 +		rgba[i * 4 + 0] = _bgR;
 +		rgba[i * 4 + 1] = _bgG;
 +		rgba[i * 4 + 2] = _bgB;
-+		rgba[i * 4 + 3] = 255;
++		rgba[i * 4 + 3] = 0;
 +	}
 +	if (_frames.empty() || width <= 0 || height <= 0)
 +		return;
@@ -1507,6 +1515,7 @@ index 00000000..11212c49
 +	_viewScale = 100;
 +	_originCenter = true;
 +	_regX = _regY = 0;
++	_mask = nullptr;
 +	const Common::Array<byte> &xd = source.getXtraData();
 +	if (xd.size() >= 144) {
 +		auto rdf = [&](int idx) {
@@ -1515,8 +1524,14 @@ index 00000000..11212c49
 +			memcpy(&f, &v, 4);
 +			return f;
 +		};
-+		_regX = rdf(34);
-+		_regY = rdf(35);
++		auto rdi = [&](int idx) {
++			return (int)((xd[idx * 4] << 24) | (xd[idx * 4 + 1] << 16) | (xd[idx * 4 + 2] << 8) | xd[idx * 4 + 3]);
++		};
++		(void)rdf;
++		_regY = (float)rdi(9);
++		_regX = (float)rdi(10);
++		_viewH = _regX;
++		_viewV = _regY;
 +	}
 +}
 +
@@ -1533,11 +1548,16 @@ index 00000000..11212c49
 +	_viewV = source._viewV;
 +	_viewScale = source._viewScale;
 +	_originCenter = source._originCenter;
++	_mask = nullptr;
 +	_regX = source._regX;
 +	_regY = source._regY;
 +	_loaded = source._loaded;
 +	if (cast == source._cast)
 +		_children = source._children;
++}
++
++FlashXtraCastMember::~FlashXtraCastMember() {
++	delete _mask;
 +}
 +
 +void FlashXtraCastMember::load() {
@@ -1595,18 +1615,30 @@ index 00000000..11212c49
 +	if (_viewSet) {
 +		FlashXtra::SWFMovie::Matrix m;
 +		float s = _viewScale / 100.0f;
-+		m.a = s / 20.0f;
-+		m.d = s / 20.0f;
-+		float ox = _originCenter ? bbox.width() / 2.0f : 0;
-+		float oy = _originCenter ? bbox.height() / 2.0f : 0;
-+		m.tx = ox - _viewH * s;
-+		m.ty = oy - _viewV * s;
-+		debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %dx%d view (%g,%g) scale %g center %d", _castId, bbox.width(), bbox.height(), _viewH, _viewV, _viewScale, _originCenter);
++		float rx = bbox.width() / (float)MAX((int16)1, _initialRect.width());
++		float ry = bbox.height() / (float)MAX((int16)1, _initialRect.height());
++		m.a = s * rx / 20.0f;
++		m.d = s * ry / 20.0f;
++		m.tx = _regX * rx - _viewH * s * rx;
++		m.ty = _regY * ry - _viewV * s * ry;
++		debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %dx%d view (%g,%g) scale %g", _castId, bbox.width(), bbox.height(), _viewH, _viewV, _viewScale);
 +		_movie.render(_frame, bbox.width(), bbox.height(), rgba, &m);
 +	} else {
++		if (channel && g_director->getCurrentMovie() && g_director->getCurrentMovie()->getScore()) {
++			Score *sc = g_director->getCurrentMovie()->getScore();
++			for (uint i = 0; i < sc->_channels.size(); i++)
++				if (sc->_channels[i] == channel)
++					debugC(3, kDebugImages, "FlashXtraCastMember: cast %d is channel %d ink %d", _castId, i, channel->_sprite->_ink);
++		}
 +		debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %d,%d %dx%d fit frame %d ch %d vis %d", _castId, bbox.left, bbox.top, bbox.width(), bbox.height(), _frame, channel ? (int)channel->_sprite->_castId.member : -1, channel ? channel->_visible : -1);
 +		_movie.render(_frame, bbox.width(), bbox.height(), rgba);
 +	}
++
++	delete _mask;
++	_mask = new Graphics::ManagedSurface(bbox.width(), bbox.height(), Graphics::PixelFormat::createFormatCLUT8());
++	for (int y = 0; y < bbox.height(); y++)
++		for (int x = 0; x < bbox.width(); x++)
++			*((byte *)_mask->getBasePtr(x, y)) = rgba[(y * bbox.width() + x) * 4 + 3] ? 1 : 0;
 +
 +	const Graphics::PixelFormat &fmt = surf->format;
 +	// cache nearest-colour lookups for indexed output
@@ -1667,6 +1699,12 @@ index 00000000..11212c49
 +	case kTheFrame:
 +		d = _frame + 1;
 +		break;
++	case kTheViewPoint:
++		d.type = POINT;
++		d.u.farr = new FArray;
++		d.u.farr->arr.push_back((int)_viewH);
++		d.u.farr->arr.push_back((int)_viewV);
++		break;
 +	case kTheViewH:
 +		d = (int)_viewH;
 +		break;
@@ -1693,6 +1731,7 @@ index 00000000..11212c49
 +}
 +
 +void FlashXtraCastMember::setField(int field, const Datum &d) {
++	debugC(3, kDebugImages, "FlashXtraCastMember::setField(%d) cast %d = %s", field, _castId, d.asString(true).c_str());
 +	switch (field) {
 +	case kTheFrame:
 +		_frame = MAX(0, d.asInt() - 1);
@@ -1742,10 +1781,10 @@ index 00000000..11212c49
 +} // End of namespace Director
 diff --git a/engines/director/lingo/xtras-cast/flashxtra.h b/engines/director/lingo/xtras-cast/flashxtra.h
 new file mode 100644
-index 00000000..8e37cc90
+index 00000000..196afa0b
 --- /dev/null
 +++ b/engines/director/lingo/xtras-cast/flashxtra.h
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,168 @@
 +/* ScummVM - Graphic Adventure Engine
 + *
 + * ScummVM is the legal property of its developers, whose names
@@ -1888,6 +1927,7 @@ index 00000000..8e37cc90
 +	CastMember *duplicate(Cast *cast, uint16 castId) override { return (CastMember *)(new FlashXtraCastMember(cast, castId, *this)); }
 +
 +	void load() override;
++	Graphics::ManagedSurface *getFlashMask() override { return _mask; }
 +	Common::Point getRegistrationOffset() override { return Common::Point((int)_regX, (int)_regY); }
 +	Common::Point getRegistrationOffset(int16 w, int16 h) override { return Common::Point((int)(_regX * w / MAX((int16)1, _initialRect.width())), (int)(_regY * h / MAX((int16)1, _initialRect.height()))); }
 +
@@ -1906,6 +1946,8 @@ index 00000000..8e37cc90
 +	float _viewH, _viewV, _viewScale;
 +	bool _originCenter;
 +	float _regX, _regY;
++	Graphics::ManagedSurface *_mask;
++	~FlashXtraCastMember();
 +};
 +
 +} // End of namespace Director

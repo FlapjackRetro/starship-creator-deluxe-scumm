@@ -140,6 +140,7 @@ public:
 	CastMember *duplicate(Cast *cast, uint16 castId) override { return (CastMember *)(new FlashXtraCastMember(cast, castId, *this)); }
 
 	void load() override;
+	Graphics::ManagedSurface *getFlashMask() override { return _mask; }
 	Common::Point getRegistrationOffset() override { return Common::Point((int)_regX, (int)_regY); }
 	Common::Point getRegistrationOffset(int16 w, int16 h) override { return Common::Point((int)(_regX * w / MAX((int16)1, _initialRect.width())), (int)(_regY * h / MAX((int16)1, _initialRect.height()))); }
 
@@ -158,6 +159,8 @@ public:
 	float _viewH, _viewV, _viewScale;
 	bool _originCenter;
 	float _regX, _regY;
+	Graphics::ManagedSurface *_mask;
+	~FlashXtraCastMember();
 };
 
 } // End of namespace Director

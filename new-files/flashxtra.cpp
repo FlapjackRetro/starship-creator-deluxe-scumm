@@ -21,6 +21,7 @@
 
 #include "common/algorithm.h"
 #include "common/debug.h"
+#include "common/file.h"
 #include "common/util.h"
 #include "common/hashmap.h"
 #include <math.h>
@@ -32,6 +33,9 @@
 #include "director/cast.h"
 #include "director/castmember/xtra.h"
 #include "director/channel.h"
+#include "director/score.h"
+#include "director/movie.h"
+#include "director/sprite.h"
 #include "director/lingo/lingo.h"
 #include "director/lingo/lingo-the.h"
 #include "director/lingo/xtras-cast/flashxtra.h"
@@ -757,7 +761,7 @@ void SWFMovie::render(int frame, int width, int height, Common::Array<byte> &rgb
 		rgba[i * 4 + 0] = _bgR;
 		rgba[i * 4 + 1] = _bgG;
 		rgba[i * 4 + 2] = _bgB;
-		rgba[i * 4 + 3] = 255;
+		rgba[i * 4 + 3] = 0;
 	}
 	if (_frames.empty() || width <= 0 || height <= 0)
 		return;
@@ -834,6 +838,7 @@ FlashXtraCastMember::FlashXtraCastMember(Cast *cast, uint16 castId, XtraCastMemb
 	_viewScale = 100;
 	_originCenter = true;
 	_regX = _regY = 0;
+	_mask = nullptr;
 	const Common::Array<byte> &xd = source.getXtraData();
 	if (xd.size() >= 144) {
 		auto rdf = [&](int idx) {
@@ -842,8 +847,14 @@ FlashXtraCastMember::FlashXtraCastMember(Cast *cast, uint16 castId, XtraCastMemb
 			memcpy(&f, &v, 4);
 			return f;
 		};
-		_regX = rdf(34);
-		_regY = rdf(35);
+		auto rdi = [&](int idx) {
+			return (int)((xd[idx * 4] << 24) | (xd[idx * 4 + 1] << 16) | (xd[idx * 4 + 2] << 8) | xd[idx * 4 + 3]);
+		};
+		(void)rdf;
+		_regY = (float)rdi(9);
+		_regX = (float)rdi(10);
+		_viewH = _regX;
+		_viewV = _regY;
 	}
 }
 
@@ -860,11 +871,16 @@ FlashXtraCastMember::FlashXtraCastMember(Cast *cast, uint16 castId, FlashXtraCas
 	_viewV = source._viewV;
 	_viewScale = source._viewScale;
 	_originCenter = source._originCenter;
+	_mask = nullptr;
 	_regX = source._regX;
 	_regY = source._regY;
 	_loaded = source._loaded;
 	if (cast == source._cast)
 		_children = source._children;
+}
+
+FlashXtraCastMember::~FlashXtraCastMember() {
+	delete _mask;
 }
 
 void FlashXtraCastMember::load() {
@@ -922,18 +938,30 @@ Graphics::MacWidget *FlashXtraCastMember::createWidget(Common::Rect &bbox, Chann
 	if (_viewSet) {
 		FlashXtra::SWFMovie::Matrix m;
 		float s = _viewScale / 100.0f;
-		m.a = s / 20.0f;
-		m.d = s / 20.0f;
-		float ox = _originCenter ? bbox.width() / 2.0f : 0;
-		float oy = _originCenter ? bbox.height() / 2.0f : 0;
-		m.tx = ox - _viewH * s;
-		m.ty = oy - _viewV * s;
-		debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %dx%d view (%g,%g) scale %g center %d", _castId, bbox.width(), bbox.height(), _viewH, _viewV, _viewScale, _originCenter);
+		float rx = bbox.width() / (float)MAX((int16)1, _initialRect.width());
+		float ry = bbox.height() / (float)MAX((int16)1, _initialRect.height());
+		m.a = s * rx / 20.0f;
+		m.d = s * ry / 20.0f;
+		m.tx = _regX * rx - _viewH * s * rx;
+		m.ty = _regY * ry - _viewV * s * ry;
+		debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %dx%d view (%g,%g) scale %g", _castId, bbox.width(), bbox.height(), _viewH, _viewV, _viewScale);
 		_movie.render(_frame, bbox.width(), bbox.height(), rgba, &m);
 	} else {
+		if (channel && g_director->getCurrentMovie() && g_director->getCurrentMovie()->getScore()) {
+			Score *sc = g_director->getCurrentMovie()->getScore();
+			for (uint i = 0; i < sc->_channels.size(); i++)
+				if (sc->_channels[i] == channel)
+					debugC(3, kDebugImages, "FlashXtraCastMember: cast %d is channel %d ink %d", _castId, i, channel->_sprite->_ink);
+		}
 		debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %d,%d %dx%d fit frame %d ch %d vis %d", _castId, bbox.left, bbox.top, bbox.width(), bbox.height(), _frame, channel ? (int)channel->_sprite->_castId.member : -1, channel ? channel->_visible : -1);
 		_movie.render(_frame, bbox.width(), bbox.height(), rgba);
 	}
+
+	delete _mask;
+	_mask = new Graphics::ManagedSurface(bbox.width(), bbox.height(), Graphics::PixelFormat::createFormatCLUT8());
+	for (int y = 0; y < bbox.height(); y++)
+		for (int x = 0; x < bbox.width(); x++)
+			*((byte *)_mask->getBasePtr(x, y)) = rgba[(y * bbox.width() + x) * 4 + 3] ? 1 : 0;
 
 	const Graphics::PixelFormat &fmt = surf->format;
 	// cache nearest-colour lookups for indexed output
@@ -994,6 +1022,12 @@ Datum FlashXtraCastMember::getField(int field) {
 	case kTheFrame:
 		d = _frame + 1;
 		break;
+	case kTheViewPoint:
+		d.type = POINT;
+		d.u.farr = new FArray;
+		d.u.farr->arr.push_back((int)_viewH);
+		d.u.farr->arr.push_back((int)_viewV);
+		break;
 	case kTheViewH:
 		d = (int)_viewH;
 		break;
@@ -1020,6 +1054,7 @@ Datum FlashXtraCastMember::getField(int field) {
 }
 
 void FlashXtraCastMember::setField(int field, const Datum &d) {
+	debugC(3, kDebugImages, "FlashXtraCastMember::setField(%d) cast %d = %s", field, _castId, d.asString(true).c_str());
 	switch (field) {
 	case kTheFrame:
 		_frame = MAX(0, d.asInt() - 1);
