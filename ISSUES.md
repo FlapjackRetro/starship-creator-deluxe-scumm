@@ -14,3 +14,7 @@
 
 ## Not yet tested / not implemented
 - QD3D assembly view; Crew, Fleet, Mission screens.
+
+## Systems: selecting a part (v15)
+- Fixed: `set the rect of member` on text/field members was read-only, misaligning the part-info title ("Class 7").
+- Improved: the screen is blank for a moment while the part-info panel rebuilds (the game's own strip animation + ~90 `updateStage` calls). Unmasked background-transparent bitmaps now use a fast blit path, cutting the blank from ~2 s to <1 s on a slow software renderer. Original shows progressive redraw; ours is a short blank.
