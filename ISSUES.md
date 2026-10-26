@@ -18,3 +18,6 @@
 ## Systems: selecting a part (v15)
 - Fixed: `set the rect of member` on text/field members was read-only, misaligning the part-info title ("Class 7").
 - Improved: the screen is blank for a moment while the part-info panel rebuilds (the game's own strip animation + ~90 `updateStage` calls). Unmasked background-transparent bitmaps now use a fast blit path, cutting the blank from ~2 s to <1 s on a slow software renderer. Original shows progressive redraw; ours is a short blank.
+
+## v16: `play frame sprite(n)` (root cause of slow Systems redraws)
+`cPartInfo.mShowDisplay` runs `play frame sprite(pflashspr)`, which is a Flash-sprite "play" command, not a movie jump. ScummVM treated it as a frame jump, re-running endSprite/beginSprite/mClose/mArrive for the whole screen on every selection (seconds of blank). It is now a no-op for sprite references. Flash timeline *playback* (as opposed to static frames) is still unimplemented.
