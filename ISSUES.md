@@ -21,3 +21,8 @@
 
 ## v16: `play frame sprite(n)` (root cause of slow Systems redraws)
 `cPartInfo.mShowDisplay` runs `play frame sprite(pflashspr)`, which is a Flash-sprite "play" command, not a movie jump. ScummVM treated it as a frame jump, re-running endSprite/beginSprite/mClose/mArrive for the whole screen on every selection (seconds of blank). It is now a no-op for sprite references. Flash timeline *playback* (as opposed to static frames) is still unimplemented.
+
+## v17: Mission screen
+- Fixed: RUN MISSION crashed into the debugger (`getAt` on INT). `put x into field N` created the ship-def field but without cast info, so `set the name of member N` failed and `field "NCC#####"` was never found.
+- Added: `the defaultRect of member` get/set for Flash members (map/flyby sizing); regPoint is now in default-rect units.
+- Open: the mission alert (STAlert2.dxr MIAW) opens as a blank white box. `set the drawRect of window` is unsupported (warning only) and the MIAW content is not painted.

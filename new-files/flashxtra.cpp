@@ -880,6 +880,7 @@ FlashXtraCastMember::FlashXtraCastMember(Cast *cast, uint16 castId, FlashXtraCas
 	_mask = nullptr;
 	_regX = source._regX;
 	_regY = source._regY;
+	_regUnit = source._regUnit;
 	_loaded = source._loaded;
 	if (cast == source._cast)
 		_children = source._children;
@@ -1052,8 +1053,8 @@ Datum FlashXtraCastMember::getField(int field) {
 	case kTheRegPoint:
 		d.type = POINT;
 		d.u.farr = new FArray;
-		d.u.farr->arr.push_back((double)_regX);
-		d.u.farr->arr.push_back((double)_regY);
+		d.u.farr->arr.push_back((double)(_regX / _regUnit));
+		d.u.farr->arr.push_back((double)(_regY / _regUnit));
 		break;
 	default:
 		d = CastMember::getField(field);
@@ -1071,8 +1072,8 @@ void FlashXtraCastMember::setField(int field, const Datum &d) {
 			Score *score = g_director->getCurrentMovie()->getScore();
 			if (score)
 				score->invalidateRectsForMember(this);
-			_regX = (float)d.u.farr->arr[0].asFloat();
-			_regY = (float)d.u.farr->arr[1].asFloat();
+			_regX = (float)d.u.farr->arr[0].asFloat() * _regUnit;
+			_regY = (float)d.u.farr->arr[1].asFloat() * _regUnit;
 			setModified(true);
 		}
 		return;
@@ -1138,6 +1139,48 @@ void FlashXtraCastMember::flashToStage(const Common::Rect &bbox, float fx, float
 
 Common::String FlashXtraCastMember::formatInfo() {
 	return Common::String::format("initialRect: %dx%d, frames: %d", _initialRect.width(), _initialRect.height(), _movie.getFrameCount());
+}
+
+// `the defaultRect of member` sets/reads the size the member gets when placed on the stage.
+bool FlashXtraCastMember::hasProp(const Common::String &propName) {
+	if (propName.equalsIgnoreCase("defaultRect"))
+		return true;
+	return CastMember::hasProp(propName);
+}
+
+Datum FlashXtraCastMember::getProp(const Common::String &propName) {
+	if (propName.equalsIgnoreCase("defaultRect")) {
+		load();
+		Datum d;
+		d.type = RECT;
+		d.u.farr = new FArray;
+		d.u.farr->arr.push_back(Datum(0));
+		d.u.farr->arr.push_back(Datum(0));
+		d.u.farr->arr.push_back(Datum((int)_initialRect.width()));
+		d.u.farr->arr.push_back(Datum((int)_initialRect.height()));
+		return d;
+	}
+	return CastMember::getProp(propName);
+}
+
+void FlashXtraCastMember::setProp(const Common::String &propName, const Datum &value, bool force) {
+	if (propName.equalsIgnoreCase("defaultRect")) {
+		if (value.type == RECT && value.u.farr->arr.size() >= 4) {
+			int w = value.u.farr->arr[2].asInt() - value.u.farr->arr[0].asInt();
+			int h = value.u.farr->arr[3].asInt() - value.u.farr->arr[1].asInt();
+			if (w > 0 && h > 0) {
+				Score *score = g_director->getCurrentMovie()->getScore();
+				if (score)
+					score->invalidateRectsForMember(this);
+				_initialRect = Common::Rect(w, h);
+				float iw = (float)MAX((int16)1, stageW()), ih = (float)MAX((int16)1, stageH());
+				_regUnit = 1.0f / MIN(w / iw, h / ih);
+				setModified(true);
+			}
+		}
+		return;
+	}
+	CastMember::setProp(propName, value, force);
 }
 
 } // End of namespace Director

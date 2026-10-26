@@ -1,0 +1,2908 @@
+diff --git a/engines/director/castmember/bitmap.cpp b/engines/director/castmember/bitmap.cpp
+index 6c928ccb..4bcf566a 100644
+--- a/engines/director/castmember/bitmap.cpp
++++ b/engines/director/castmember/bitmap.cpp
+@@ -243,6 +243,29 @@ BitmapCastMember::BitmapCastMember(Cast *cast, uint16 castId, Common::SeekableRe
+ 	_tag = castTag;
+ }
+ 
++BitmapCastMember::BitmapCastMember(Cast *cast, uint16 castId)
++	: CastMember(cast, castId) {
++	_type = kCastBitmap;
++	_picture = new Picture();
++	_ditheredImg = nullptr;
++	_matte = nullptr;
++	_noMatte = false;
++	_bytes = 0;
++	_pitch = 0;
++	_flags1 = 0;
++	_flags2 = 0;
++	_regX = _regY = 0;
++	_clut = CastMemberID(0, 0);
++	_ditheredTargetClut = CastMemberID(0, 0);
++	_bitsPerPixel = 0;
++	_tag = 0;
++	_external = false;
++	_editVersion = 0;
++	_updateFlags = 0;
++	_loaded = true;
++	_version = g_director->getVersion();
++}
++
+ BitmapCastMember::BitmapCastMember(Cast *cast, uint16 castId, Image::ImageDecoder *img, uint8 flags1)
+ 	: CastMember(cast, castId) {
+ 	_type = kCastBitmap;
+@@ -483,7 +506,12 @@ Graphics::Surface *BitmapCastMember::getDitherImg() {
+ 		}
+ 		if (_external || (targetBpp != 1) || (castPaletteId != currentPaletteId && !isColorCycling)) {
+ 			const auto pals = g_director->getLoadedPalettes();
+-			CastMemberID palIndex = pals.contains(castPaletteId) ? castPaletteId : CastMemberID(kClutSystemMac, -1);
++			// An unresolvable palette reference (e.g. a palette that lives in a cast that
++			// isn't loaded) most likely means "the palette the movie is already using",
++			// rather than the Mac system palette.
++			CastMemberID palIndex = castPaletteId;
++			if (!pals.contains(palIndex))
++				palIndex = pals.contains(currentPaletteId) ? currentPaletteId : CastMemberID(kClutSystemMac, -1);
+ 			const PaletteV4 &srcPal = pals.getVal(palIndex);
+ 
+ 			// If it is an external image, use the included palette.
+diff --git a/engines/director/castmember/castmember.h b/engines/director/castmember/castmember.h
+index 88afbd2d..dd6d11ef 100644
+--- a/engines/director/castmember/castmember.h
++++ b/engines/director/castmember/castmember.h
+@@ -61,6 +61,11 @@ public:
+ 	virtual void unload();
+ 	bool isLoaded() { return _loaded; }
+ 
++	// True for Shockwave Audio streaming members
++	virtual bool isSWA() const { return false; }
++	virtual bool isFlash() const { return false; }
++	virtual Graphics::ManagedSurface *getFlashMask() { return nullptr; }
++
+ 	virtual bool isEditable() { return false; }
+ 	virtual void setEditable(bool editable) {}
+ 	virtual bool isModified() { return _modified; }
+diff --git a/engines/director/castmember/text.cpp b/engines/director/castmember/text.cpp
+index f31db9ce..e55084bd 100644
+--- a/engines/director/castmember/text.cpp
++++ b/engines/director/castmember/text.cpp
+@@ -792,6 +792,28 @@ void TextCastMember::setField(int field, const Datum &d) {
+ 	case kTheText:
+ 		setRawText(d.asString());
+ 		return;
++	case kTheRect:
++		if (d.type == RECT && d.u.farr->arr.size() >= 4) {
++			Common::Rect r(d.u.farr->arr[0].asInt(), d.u.farr->arr[1].asInt(), d.u.farr->arr[2].asInt(), d.u.farr->arr[3].asInt());
++			if (r.width() > 0 && r.height() > 0) {
++				_initialRect = r;
++				setModified(true);
++				// sprites that were not stretched by the score follow their member's size
++				Score *sc = g_director->getCurrentMovie() ? g_director->getCurrentMovie()->getScore() : nullptr;
++				if (sc) {
++					for (uint i = 0; i < sc->_channels.size(); i++) {
++						Sprite *sp = sc->_channels[i]->_sprite;
++						if (sp && sp->_cast == this && !sp->_stretch) {
++							sp->_width = r.width();
++							sp->_height = r.height();
++							sc->_channels[i]->_widgetDirty = true;
++							sc->_channels[i]->setDirty();
++						}
++					}
++				}
++			}
++		}
++		return;
+ 	case kTheTextAlign:
+ 		{
+ 			Common::String select = d.asString();
+diff --git a/engines/director/castmember/xtra.cpp b/engines/director/castmember/xtra.cpp
+index a60dd43d..0f3a0116 100644
+--- a/engines/director/castmember/xtra.cpp
++++ b/engines/director/castmember/xtra.cpp
+@@ -29,7 +29,9 @@
+ #include "director/castmember/digitalvideo.h"
+ #include "director/lingo/lingo-the.h"
+ #include "director/lingo/xtras-cast/cursorxtra.h"
++#include "director/lingo/xtras-cast/swaxtra.h"
+ #include "director/lingo/xtras-cast/textxtra.h"
++#include "director/lingo/xtras-cast/flashxtra.h"
+ 
+ namespace Director {
+ 
+@@ -41,7 +43,9 @@ struct XtraCastMemberProto {
+ static const XtraCastMemberProto xtraCastMemberProtos[] = {
+ 	{ "cursor", CursorXtra::createCastMember },
+ 	{ "quickTimeMedia", DigitalVideoCastMember::createFromXtra },
++	{ "SWA", SWAXtra::createCastMember },
+ 	{ "text", TextXtra::createCastMember },
++	{ "flash", FlashXtra::createCastMember },
+ 	{ "font", nullptr },
+ 	{ nullptr, nullptr },
+ };
+diff --git a/engines/director/channel.cpp b/engines/director/channel.cpp
+index 8f53c3dc..fa35cb84 100644
+--- a/engines/director/channel.cpp
++++ b/engines/director/channel.cpp
+@@ -50,6 +50,9 @@ Channel::Channel(Score *sc, Sprite *sp, int priority) {
+ 	_widget = nullptr;
+ 	_constraint = 0;
+ 	_mask = nullptr;
++	_rotSurf = _rotMask = nullptr;
++	_rotKeySrc = nullptr;
++	_rotKeyAngle = 0;
+ 
+ 	_priority = priority;
+ 
+@@ -86,6 +89,9 @@ Channel& Channel::operator=(const Channel &channel) {
+ 	_widget = nullptr;
+ 	_constraint = channel._constraint;
+ 	_mask = nullptr;
++	_rotSurf = _rotMask = nullptr;
++	_rotKeySrc = nullptr;
++	_rotKeyAngle = 0;
+ 
+ 	_priority = channel._priority;
+ 
+@@ -108,6 +114,7 @@ Channel& Channel::operator=(const Channel &channel) {
+ 
+ 
+ Channel::~Channel() {
++	clearRotation();
+ 	// A digital video cast member can outlive this channel.
+ 	if (_score && _sprite && _sprite->_cast && _sprite->_cast->_type == kCastDigitalVideo) {
+ 		DigitalVideoCastMember *video = (DigitalVideoCastMember *)_sprite->_cast;
+@@ -152,11 +159,18 @@ DirectorPlotData Channel::getPlotData() {
+ 	// Disable custom fgColor/bgColor blits for videos
+ 	} else if (_sprite->_cast && _sprite->_cast->_type == kCastDigitalVideo) {
+ 		pd.applyColor = false;
++	} else if (_sprite->_cast && _sprite->_cast->isFlash()) {
++		// Flash content carries its own colours; fore/back colour tinting never applies
++		pd.applyColor = false;
+ 	} else {
+ 		pd.setApplyColor();
+ 	}
+ 
+ 	pd.srfMask = nullptr;
++	if (_sprite->_cast && _sprite->_cast->_type == kCastXtra)
++		pd.srfMask = _sprite->_cast->getFlashMask();
++	if (_rotSurf && isRotated())
++		pd.srfMask = _rotMask;
+ 	if (_sprite->_cast && _sprite->_cast->_type == kCastText) {
+ 		// kInkTypeCopy -- no mask, default rendering
+ 
+@@ -181,7 +195,67 @@ DirectorPlotData Channel::getPlotData() {
+ 	return pd;
+ }
+ 
++void Channel::clearRotation() {
++	delete _rotSurf;
++	delete _rotMask;
++	_rotSurf = _rotMask = nullptr;
++	_rotKeySrc = nullptr;
++}
++
++// Build rotated copies of the widget surface and its mask. Returns false if not possible.
++bool Channel::buildRotation() {
++	if (!_widget || !_widget->getSurface() || !_sprite) {
++		clearRotation();
++		return false;
++	}
++	Graphics::ManagedSurface *src = _widget->getSurface();
++	Common::Rect r0 = _sprite->getBbox(true);
++	Common::Rect rb = _sprite->getBbox(false);
++	float angle = _sprite->_rotation;
++	if (_rotSurf && _rotKeySrc == src && _rotKeyAngle == angle && _rotKeyRect == rb && _rotSurf->w == rb.width() && _rotSurf->h == rb.height())
++		return true;
++
++	clearRotation();
++	if (rb.width() <= 0 || rb.height() <= 0 || rb.width() > 4096 || rb.height() > 4096)
++		return false;
++
++	const Graphics::Surface *srcMask = getMaskUnrotated(false);
++	if (!srcMask && _sprite->_cast && _sprite->_cast->_type == kCastXtra)
++		srcMask = _sprite->_cast->getFlashMask() ? &_sprite->_cast->getFlashMask()->rawSurface() : nullptr;
++
++	_rotSurf = new Graphics::ManagedSurface(rb.width(), rb.height(), src->format);
++	_rotMask = new Graphics::ManagedSurface(rb.width(), rb.height(), Graphics::PixelFormat::createFormatCLUT8());
++	_rotSurf->clear(0);
++	_rotMask->clear(0);
++
++	Common::Point pivot = _sprite->getRegPoint();
++	float th = angle * 0.01745329252f;
++	float cs = cosf(th), sn = sinf(th);
++	int bpp = src->format.bytesPerPixel;
++	for (int dy = 0; dy < rb.height(); dy++) {
++		for (int dx = 0; dx < rb.width(); dx++) {
++			float x = rb.left + dx + 0.5f - pivot.x;
++			float y = rb.top + dy + 0.5f - pivot.y;
++			float sx = pivot.x + x * cs + y * sn - r0.left;
++			float sy = pivot.y - x * sn + y * cs - r0.top;
++			int ix = (int)floorf(sx), iy = (int)floorf(sy);
++			if (ix < 0 || iy < 0 || ix >= src->w || iy >= src->h)
++				continue;
++			if (srcMask && (ix >= srcMask->w || iy >= srcMask->h || !*((const byte *)srcMask->getBasePtr(ix, iy))))
++				continue;
++			memcpy(_rotSurf->getBasePtr(dx, dy), src->getBasePtr(ix, iy), bpp);
++			*((byte *)_rotMask->getBasePtr(dx, dy)) = 1;
++		}
++	}
++	_rotKeySrc = src;
++	_rotKeyAngle = angle;
++	_rotKeyRect = rb;
++	return true;
++}
++
+ Graphics::ManagedSurface *Channel::getSurface() {
++	if (isRotated() && _widget && buildRotation())
++		return _rotSurf;
+ 	if (_widget) {
+ 		return _widget->getSurface();
+ 	} else {
+@@ -190,6 +264,12 @@ Graphics::ManagedSurface *Channel::getSurface() {
+ }
+ 
+ const Graphics::Surface *Channel::getMask(bool forceMatte) {
++	if (isRotated() && _rotSurf)
++		return nullptr;
++	return getMaskUnrotated(forceMatte);
++}
++
++const Graphics::Surface *Channel::getMaskUnrotated(bool forceMatte) {
+ 	if (!_sprite->_cast || _sprite->_spriteType == kTextSprite)
+ 		return nullptr;
+ 
+@@ -210,7 +290,7 @@ const Graphics::Surface *Channel::getMask(bool forceMatte) {
+ 	if (!_sprite->isQDShape() && _sprite->_ink == kInkTypeCopy && _sprite->_thickness & kTHasBlend)
+ 		needsMatte = true;
+ 
+-	Common::Rect bbox(getBbox());
++	Common::Rect bbox(getBbox(true));
+ 
+ 	if (needsMatte || forceMatte) {
+ 		// Mattes are only supported in bitmaps for now. Shapes don't need mattes,
+@@ -528,6 +608,15 @@ void Channel::setClean(Sprite *nextSprite, bool partial) {
+ 		if (_sprite->_puppet || _sprite->_autoPuppet || (!nextSprite->isQDShape() && partial)) {
+ 			// Updating scripts, etc. does not require a full re-render
+ 			_sprite->_scriptId = nextSprite->_scriptId;
++
++			if (g_director->getVersion() >= 600) {
++				// The sprite span and behaviors still come from the score, even for puppets
++				// (they are wiped by killScriptInstances when the span is left).
++				_startFrame = nextSprite->_spriteInfo.startFrame;
++				_endFrame = nextSprite->_spriteInfo.endFrame;
++				if (_sprite->_behaviors.empty())
++					_sprite->_behaviors = nextSprite->_behaviors;
++			}
+ 		} else {
+ 			previousCastId = _sprite->_castId;
+ 			replaceSprite(nextSprite);
+@@ -739,6 +828,7 @@ void Channel::replaceWidget(CastMemberID previousCastId, bool force) {
+ 		return;
+ 	}
+ 
++	clearRotation();
+ 	if (_widget) {
+ 		delete _widget;
+ 		_widget = nullptr;
+diff --git a/engines/director/channel.h b/engines/director/channel.h
+index a5513828..4e374f7b 100644
+--- a/engines/director/channel.h
++++ b/engines/director/channel.h
+@@ -129,6 +129,7 @@ public:
+ 	Common::Rect _rollOverBbox;
+ 	Common::Rect _lastRenderedBbox;
+ 	bool _lastTrail;
++	bool _lastRenderedHidden = false;
+ 
+ 	int _startFrame;
+ 	int _endFrame;
+@@ -136,6 +137,15 @@ public:
+ 
+ private:
+ 	Graphics::ManagedSurface *getSurface();
++	const Graphics::Surface *getMaskUnrotated(bool forceMatte);
++	bool buildRotation();
++	void clearRotation();
++	bool isRotated() { return _sprite && _sprite->_rotation != 0.0f; }
++	Graphics::ManagedSurface *_rotSurf;
++	Graphics::ManagedSurface *_rotMask;
++	const void *_rotKeySrc;
++	float _rotKeyAngle;
++	Common::Rect _rotKeyRect;
+ 	Score *_score;
+ };
+ 
+diff --git a/engines/director/frame.cpp b/engines/director/frame.cpp
+index d9261b8e..c9d38327 100644
+--- a/engines/director/frame.cpp
++++ b/engines/director/frame.cpp
+@@ -860,6 +860,10 @@ void Frame::readMainChannelsD5(Common::MemoryReadStreamEndian &stream, uint16 of
+ 			break;
+ 		case 26:
+ 			_mainChannels.palette.paletteId.member = stream.readSint16();
++			// A built-in palette reference in a D5+ score carries castLib -1;
++			// a negative member with castLib 0 means "no palette set in this frame".
++			if (_mainChannels.palette.paletteId.member < 0 && _mainChannels.palette.paletteId.castLib == 0)
++				_mainChannels.palette.paletteId = CastMemberID();
+ 			if (!g_director->hasPalette(_mainChannels.palette.paletteId))
+ 				_mainChannels.palette.paletteId = CastMemberID();
+ 			if (!_mainChannels.palette.paletteId.isNull())
+@@ -1271,6 +1275,10 @@ void Frame::readMainChannelsD6(Common::MemoryReadStreamEndian &stream, uint16 of
+ 			break;
+ 		case 120+2:
+ 			_mainChannels.palette.paletteId.member = stream.readSint16();
++			// A built-in palette reference in a D5+ score carries castLib -1;
++			// a negative member with castLib 0 means "no palette set in this frame".
++			if (_mainChannels.palette.paletteId.member < 0 && _mainChannels.palette.paletteId.castLib == 0)
++				_mainChannels.palette.paletteId = CastMemberID();
+ 			if (!g_director->hasPalette(_mainChannels.palette.paletteId))
+ 				_mainChannels.palette.paletteId = CastMemberID();
+ 			if (!_mainChannels.palette.paletteId.isNull())
+@@ -1728,6 +1736,10 @@ void Frame::readMainChannelsD7(Common::MemoryReadStreamEndian &stream, uint16 of
+ 			break;
+ 		case 240+2:
+ 			_mainChannels.palette.paletteId.member = stream.readSint16();
++			// A built-in palette reference in a D5+ score carries castLib -1;
++			// a negative member with castLib 0 means "no palette set in this frame".
++			if (_mainChannels.palette.paletteId.member < 0 && _mainChannels.palette.paletteId.castLib == 0)
++				_mainChannels.palette.paletteId = CastMemberID();
+ 			if (!g_director->hasPalette(_mainChannels.palette.paletteId))
+ 				_mainChannels.palette.paletteId = CastMemberID();
+ 			if (!_mainChannels.palette.paletteId.isNull())
+diff --git a/engines/director/graphics.cpp b/engines/director/graphics.cpp
+index 178f0467..c6df8338 100644
+--- a/engines/director/graphics.cpp
++++ b/engines/director/graphics.cpp
+@@ -765,7 +765,7 @@ void DirectorPlotData::inkBlitSurface(Common::Rect &srcRect, const Graphics::Sur
+ 		offsetRect.clip(srfClip);
+ 		switch (ink) {
+ 		case kInkTypeCopy:
+-			if (!mask) {
++			if (!mask && !srfMask) {
+ 				dst->blitFrom(*srf, offsetRect, destRect);
+ 				return;
+ 			}
+@@ -779,6 +779,62 @@ void DirectorPlotData::inkBlitSurface(Common::Rect &srcRect, const Graphics::Sur
+ 	// format as the window manager. Most of the time this is
+ 	// the job of BitmapCastMember::createWidget.
+ 
++	// FAST PATH 2: plain masked copies (matte / copy-with-mask / flash layers) need
++	// no ink maths, only "copy this pixel if the mask says so".
++	if (!applyColor && !alpha && !ms && (mask || srfMask) &&
++		sprite != kTextSprite && sprite != kButtonSprite && sprite != kCheckboxSprite && sprite != kRadioButtonSprite &&
++		(ink == kInkTypeCopy || ink == kInkTypeMatte || ink == kInkTypeBlend || (ink == kInkTypeBackgndTrans && srfMask)) &&
++		srf->format.bytesPerPixel == dst->format.bytesPerPixel) {
++		int bpp = srf->format.bytesPerPixel;
++		int sy = abs(srcRect.top - destRect.top);
++		int sx0 = abs(srcRect.left - destRect.left);
++		for (int i = 0; i < destRect.height(); i++, sy++) {
++			int dy = destRect.top + i;
++			if (sy < 0 || sy >= srf->h || dy < 0 || dy >= dst->h)
++				continue;
++			const Graphics::Surface *m = srfMask ? (const Graphics::Surface *)&srfMask->rawSurface() : mask;
++			if (sy >= m->h)
++				continue;
++			const byte *msk = (const byte *)m->getBasePtr(0, sy);
++			const byte *sp = (const byte *)srf->getBasePtr(0, sy);
++			byte *dp = (byte *)dst->getBasePtr(0, dy);
++			int mw = m->w;
++			for (int j = 0; j < destRect.width(); j++) {
++				int sx = sx0 + j, dx = destRect.left + j;
++				if (sx >= srf->w || dx < 0 || dx >= dst->w || sx >= mw)
++					continue;
++				if (!msk[sx])
++					continue;
++				memcpy(dp + dx * bpp, sp + sx * bpp, bpp);
++			}
++		}
++		return;
++	}
++
++	// FAST PATH 3: unmasked background-transparent bitmaps just skip pixels equal to
++	// the back colour; no ink maths, no per-pixel primitive calls.
++	if (!alpha && !ms && !mask && !srfMask && !oneBitImage && ink == kInkTypeBackgndTrans &&
++		sprite != kTextSprite && sprite != kButtonSprite && sprite != kCheckboxSprite && sprite != kRadioButtonSprite &&
++		srf->format.bytesPerPixel == 1 && dst->format.bytesPerPixel == 1) {
++		int sy = abs(srcRect.top - destRect.top);
++		int sx0 = abs(srcRect.left - destRect.left);
++		for (int i = 0; i < destRect.height(); i++, sy++) {
++			int dy = destRect.top + i;
++			if (sy < 0 || sy >= srf->h || dy < 0 || dy >= dst->h)
++				continue;
++			const byte *sp = (const byte *)srf->getBasePtr(0, sy);
++			byte *dp = (byte *)dst->getBasePtr(0, dy);
++			for (int j = 0; j < destRect.width(); j++) {
++				int sx = sx0 + j, dx = destRect.left + j;
++				if (sx >= srf->w || dx < 0 || dx >= dst->w)
++					continue;
++				if (sp[sx] != (byte)backColor)
++					dp[dx] = sp[sx];
++			}
++		}
++		return;
++	}
++
+ 	Graphics::Primitives *primitives = g_director->getInkPrimitives();
+ 
+ 	srcPoint.y = abs(srcRect.top - destRect.top);
+diff --git a/engines/director/lingo/lingo-builtins.cpp b/engines/director/lingo/lingo-builtins.cpp
+index 9695c048..98190764 100644
+--- a/engines/director/lingo/lingo-builtins.cpp
++++ b/engines/director/lingo/lingo-builtins.cpp
+@@ -45,7 +45,11 @@
+ #include "director/castmember/palette.h"
+ #include "director/castmember/text.h"
+ #include "director/castmember/transition.h"
++#include "director/lingo/lingo-the.h"
+ #include "director/lingo/lingo-builtins.h"
++#include "director/picture.h"
++#include "director/lingo/xtras-cast/swaxtra.h"
++#include "director/lingo/xtras-cast/flashxtra.h"
+ #include "director/lingo/lingo-code.h"
+ #include "director/lingo/lingo-codegen.h"
+ #include "director/lingo/lingo-utils.h"
+@@ -141,6 +145,7 @@ static const BuiltinProto builtins[] = {
+ 	{ "playAccel",		LB::b_playAccel,	-1,0, 200, CBLTIN },	// D2
+ 		// play done												// D2
+ 	{ "preLoad",		LB::b_preLoad,		-1,0, 300, CBLTIN },	//		D3.1 c
++	{ "preLoadBuffer",	LB::b_preLoadBuffer,1, 1, 500, CBLTIN },	//				D5 c, Shockwave Audio
+ 	{ "preLoadCast",	LB::b_preLoadCast,	-1,0, 300, CBLTIN },	//		D3.1 c
+ 	{ "preLoadMember",	LB::b_preLoadCast,	-1,0, 500, CBLTIN },	//				D5 c
+ 	{ "preLoadMovie",	LB::b_preLoadMovie,	1, 1, 500, CBLTIN },	//				D5 c
+@@ -150,6 +155,11 @@ static const BuiltinProto builtins[] = {
+ 	{ "send",			LB::b_call,			-1,0, 400, HBLTIN },	//			D4 c, undocumented (also usable as function)
+ 	{ "sendAncestor",	LB::b_callAncestor,	-1,0, 400, CBLTIN },	//			D4 c, undocumented
+ 	{ "shutDown",		LB::b_shutDown,		0, 0, 200, CBLTIN },	// D2 c
++	{ "StageToMember",	LB::b_stageToMember,5, 5, 500, CBLTIN },	//				ScrnXtra
++	{ "stageToFlash",	LB::b_stageToFlash,	2, 2, 600, FBLTIN },
++	{ "flashToStage",	LB::b_flashToStage,	2, 2, 600, FBLTIN },
++	{ "gotoFrame",		LB::b_gotoFrame,	2, 2, 600, CBLTIN },	//						Flash sprite
++	{ "stop",			LB::b_stop,			1, 1, 500, CBLTIN },	//				D5 c, Shockwave Audio
+ 	{ "startTimer",		LB::b_startTimer,	0, 0, 200, CBLTIN },	// D2 c
+ 	{ "stopEvent",		LB::b_stopEvent,	0, 0, 600, CBLTIN },	//						D6 c
+ 		// when keyDown												// D2
+@@ -242,6 +252,7 @@ static const BuiltinProto builtins[] = {
+ 	{ "false",			LB::b_false,		0, 0, 200, KBLTIN },	// D2 k
+ 	{ "quote",			LB::b_quote,		0, 0, 200, KBLTIN },	// D2 k
+ 	{ "return",			LB::b_returnconst,	0, 0, 200, KBLTIN },	// D2 k
++	{ "space",			LB::b_space,		0, 0, 200, KBLTIN },	// D2 k
+ 	{ "tab",			LB::b_tab,			0, 0, 200, KBLTIN },	// D2 k
+ 	{ "true",			LB::b_true,			0, 0, 200, KBLTIN },	// D2 k
+ 	{ "version",		LB::b_version,		0, 0, 300, KBLTIN },	//		D3 k
+@@ -790,12 +801,24 @@ void LB::b_numToChar(int nargs) {
+ 	Datum d = g_lingo->pop();
+ 	if (g_director->getVersion() < 400) {
+ 		TYPECHECK(d, INT);
+-	} else if (d.type != INT) {
++	} else if (d.type != INT && d.type != STRING && d.type != FLOAT && d.type != VOID) {
+ 		warning("BUILDBOT: b_numToChar: Unimplemented behaviour for arg of type %s", (d).type2str());
++		g_lingo->push(Datum(Common::String()));
+ 		return;
+ 	}
+ 
+-	int num = d.asInt();
++	// Director coerces strings to numbers here (non-numeric text gives 0)
++	int num = 0;
++	if (d.type == STRING) {
++		// non-numeric text counts as 0 (and must not trigger the 'Invalid number' path)
++		Common::String str = d.asString();
++		char *endPtr = nullptr;
++		long val = strtol(str.c_str(), &endPtr, 10);
++		if (!str.empty() && *endPtr == 0)
++			num = (int)val;
++	} else if (d.type != VOID) {
++		num = d.asInt();
++	}
+ 	g_lingo->push(Common::U32String(numToChar(num)).encode(Common::kUtf8));
+ }
+ 
+@@ -1035,7 +1058,9 @@ void LB::b_deleteProp(int nargs) {
+ 
+ void LB::b_duplicateList(int nargs) {
+ 	Datum list = g_lingo->pop();
+-	TYPECHECK2(list, ARRAY, PARRAY);
++	// rects and points are also value lists that can be duplicated
++	if (list.type != RECT && list.type != POINT)
++		TYPECHECK2(list, ARRAY, PARRAY);
+ 	g_lingo->push(list.clone());
+ }
+ 
+@@ -2097,6 +2122,17 @@ void LB::b_play(int nargs) {
+ 	Datum movie;
+ 	Datum frame;
+ 
++	// `play member` on a Shockwave Audio member starts the stream
++	if (nargs == 1) {
++		Datum arg = g_lingo->pop();
++		SWAXtraCastMember *swa = SWAXtra::fromDatum(arg);
++		if (swa) {
++			swa->play();
++			return;
++		}
++		g_lingo->push(arg);
++	}
++
+ 	switch (nargs) {
+ 	case 2:
+ 		movie = g_lingo->pop();
+@@ -2144,6 +2180,79 @@ void LB::b_playAccel(int nargs) {
+ 	g_lingo->dropStack(nargs);
+ }
+ 
++void LB::b_preLoadBuffer(int nargs) {
++	// Shockwave Audio: preLoadBuffer(member)
++	Datum d = g_lingo->pop();
++	SWAXtraCastMember *swa = SWAXtra::fromDatum(d);
++	if (swa)
++		swa->preLoadBuffer();
++	else
++		warning("LB::b_preLoadBuffer: argument %s is not a Shockwave Audio member", d.asString(true).c_str());
++}
++
++static void flashCoordConvert(bool toFlash) {
++	Datum pt = g_lingo->pop();
++	Datum spr = g_lingo->pop();
++	Datum res;
++	res.type = POINT;
++	res.u.farr = new FArray;
++	res.u.farr->arr.push_back(Datum(0));
++	res.u.farr->arr.push_back(Datum(0));
++	Score *score = g_director->getCurrentMovie()->getScore();
++	if (spr.type == SPRITEREF && score && pt.type == POINT && pt.u.farr->arr.size() >= 2) {
++		Channel *ch = score->getChannelById(spr.u.i);
++		if (ch && ch->_sprite && ch->_sprite->_cast && ch->_sprite->_cast->isFlash()) {
++			FlashXtraCastMember *fm = (FlashXtraCastMember *)ch->_sprite->_cast;
++			Common::Rect bbox = ch->getBbox();
++			float ox, oy;
++			float px = pt.u.farr->arr[0].asFloat(), py = pt.u.farr->arr[1].asFloat();
++			if (toFlash)
++				fm->stageToFlash(bbox, px, py, ox, oy);
++			else
++				fm->flashToStage(bbox, px, py, ox, oy);
++			res.u.farr->arr[0] = Datum((double)ox);
++			res.u.farr->arr[1] = Datum((double)oy);
++		}
++	}
++	g_lingo->push(res);
++}
++
++void LB::b_stageToFlash(int nargs) {
++	flashCoordConvert(true);
++}
++
++void LB::b_flashToStage(int nargs) {
++	flashCoordConvert(false);
++}
++
++void LB::b_gotoFrame(int nargs) {
++	Datum frame = g_lingo->pop();
++	Datum spr = g_lingo->pop();
++	Score *score = g_director->getCurrentMovie()->getScore();
++	debugC(3, kDebugImages, "b_gotoFrame: spr %s frame %s", spr.asString(true).c_str(), frame.asString(true).c_str());
++	if (spr.type != SPRITEREF || !score)
++		return;
++	Channel *ch = score->getChannelById(spr.u.i);
++	if (!ch || !ch->_sprite || !ch->_sprite->_cast)
++		return;
++	CastMember *cm = ch->_sprite->_cast;
++	if (cm->_type == kCastXtra) {
++		cm->setField(kTheFrame, frame);
++		ch->_widgetDirty = true;
++		cm->setModified(true);
++	}
++}
++
++void LB::b_stop(int nargs) {
++	// Shockwave Audio: stop(member)
++	Datum d = g_lingo->pop();
++	SWAXtraCastMember *swa = SWAXtra::fromDatum(d);
++	if (swa)
++		swa->stop();
++	else
++		warning("LB::b_stop: argument %s is not a Shockwave Audio member", d.asString(true).c_str());
++}
++
+ void LB::b_preLoad(int nargs) {
+ 	// We always pretend we preloaded all frames
+ 	// Returning the number of the last frame successfully "loaded"
+@@ -3302,6 +3411,15 @@ void LB::b_puppetSprite(int nargs) {
+ 			int spriteId = sprite.asInt();
+ 			Sprite *target = sc->getSpriteById(spriteId);
+ 			bool val = (bool)state.asInt();
++			if (!val && target->_puppet && target->_rotation != 0.0f) {
++				// releasing a puppet gives the sprite back to the score; drop Lingo-set rotation
++				target->_rotation = 0.0f;
++				Channel *ch = sc->getChannelById(spriteId);
++				if (ch) {
++					ch->setDirty();
++					ch->setNeedsDraw();
++				}
++			}
+ 			target->_puppet = val;
+ 		} else {
+ 			warning("b_puppetSprite: sprite index out of bounds");
+@@ -4125,6 +4243,57 @@ void LB::b_returnconst(int nargs) {
+ 	g_lingo->push(Datum(Common::String("\r")));
+ }
+ 
++void LB::b_space(int nargs) {
++	g_lingo->push(Datum(Common::String(" ")));
++}
++
++// ScrnXtra: StageToMember(left, top, right, bottom, memberNum)
++// Copies a region of the stage into a bitmap cast member.
++void LB::b_stageToMember(int nargs) {
++	Datum mem = g_lingo->pop();
++	int bottom = g_lingo->pop().asInt();
++	int right = g_lingo->pop().asInt();
++	int top = g_lingo->pop().asInt();
++	int left = g_lingo->pop().asInt();
++
++	Movie *movie = g_director->getCurrentMovie();
++	Window *stage = g_director->getCurrentWindow();
++	if (!movie || !stage)
++		return;
++
++	Graphics::ManagedSurface *src = stage->getSurface();
++	Common::Rect area(left, top, right, bottom);
++	area.clip(Common::Rect(src->w, src->h));
++	if (area.isEmpty())
++		return;
++
++	CastMemberID id = mem.asMemberID();
++	Cast *cast = movie->getCast(id);
++	if (!cast)
++		return;
++
++	// Grabbing into an empty slot creates the bitmap
++	if (!movie->getCastMember(id))
++		cast->setCastMember(id.member, new BitmapCastMember(cast, id.member));
++	CastMember *member = movie->getCastMember(id);
++	if (!member || member->_type != kCastBitmap)
++		return;
++	BitmapCastMember *bitmap = static_cast<BitmapCastMember *>(member);
++
++	delete bitmap->_picture;
++	bitmap->_picture = new Picture();
++	bitmap->_picture->_surface.copyFrom(src->rawSurface().getSubArea(area));
++	if (src->format.bytesPerPixel == 1) {
++		const byte *pal = g_director->_wm->getPalette();
++		bitmap->_picture->copyPalette(pal, g_director->_wm->getPaletteSize());
++	}
++	bitmap->_initialRect = Common::Rect(area.width(), area.height());
++	bitmap->_regX = area.width() / 2;
++	bitmap->_regY = area.height() / 2;
++	bitmap->_external = true;
++	bitmap->setModified(true);
++}
++
+ void LB::b_tab(int nargs) {
+ 	g_lingo->push(Datum(Common::String("\t")));
+ }
+diff --git a/engines/director/lingo/lingo-builtins.h b/engines/director/lingo/lingo-builtins.h
+index d3bc853f..6ca69560 100644
+--- a/engines/director/lingo/lingo-builtins.h
++++ b/engines/director/lingo/lingo-builtins.h
+@@ -155,6 +155,8 @@ void b_pause(int nargs);
+ void b_play(int nargs);
+ void b_playAccel(int nargs);
+ void b_preLoad(int nargs);
++void b_preLoadBuffer(int nargs);
++void b_stop(int nargs);
+ void b_preLoadCast(int nargs);
+ void b_preLoadMovie(int nargs);
+ void b_quit(int nargs);
+@@ -201,6 +203,11 @@ void b_enter(int nargs);
+ void b_false(int nargs);
+ void b_quote(int nargs);
+ void b_returnconst(int nargs);
++void b_space(int nargs);
++void b_stageToMember(int nargs);
++void b_gotoFrame(int nargs);
++void b_stageToFlash(int nargs);
++void b_flashToStage(int nargs);
+ void b_tab(int nargs);
+ void b_true(int nargs);
+ void b_version(int nargs);
+diff --git a/engines/director/lingo/lingo-bytecode.cpp b/engines/director/lingo/lingo-bytecode.cpp
+index 71e31176..2281aa9c 100644
+--- a/engines/director/lingo/lingo-bytecode.cpp
++++ b/engines/director/lingo/lingo-bytecode.cpp
+@@ -991,7 +991,9 @@ void LC::cb_v4theentityassign() {
+ 			} else {
+ 				Datum castLib = g_lingo->pop();
+ 				Datum fieldID = g_lingo->pop();
+-				fieldRef = Datum(CastMemberID(fieldID.asInt(), castLib.asInt()));
++				// fieldID may be a multiplex ID (member + castLib * 0x10000),
++				// so let toCastMemberID() split it rather than using the raw number
++				fieldRef = Datum(g_lingo->toCastMemberID(fieldID, castLib));
+ 			}
+ 			fieldRef.type = FIELDREF;
+ 			Datum chunkRef = readChunkRef(fieldRef);
+diff --git a/engines/director/lingo/lingo-code.cpp b/engines/director/lingo/lingo-code.cpp
+index db6ff976..d50bd843 100644
+--- a/engines/director/lingo/lingo-code.cpp
++++ b/engines/director/lingo/lingo-code.cpp
+@@ -1736,6 +1736,12 @@ void LC::call(const Common::String &name, int nargs, bool allowRetVal) {
+ 		}
+ 	}
+ 
++	// Constants (SPACE, TAB, ...) may be compiled as a plain call by name
++	if (funcSym.type == VOIDSYM && nargs == 0 && g_lingo->_builtinConsts.contains(name)) {
++		call(g_lingo->_builtinConsts[name], 0, true);
++		return;
++	}
++
+ 	// use lingo-the as fallback. we can only use functions as fallback, not properties
+ 	if (funcSym.type == VOIDSYM && g_lingo->_theEntities.contains(name) && g_lingo->_theEntities[name]->isFunction) {
+ 		Datum id;
+diff --git a/engines/director/lingo/lingo-events.cpp b/engines/director/lingo/lingo-events.cpp
+index f58d7766..87c4df03 100644
+--- a/engines/director/lingo/lingo-events.cpp
++++ b/engines/director/lingo/lingo-events.cpp
+@@ -810,9 +810,15 @@ bool Lingo::processEvent(LEvent event, ScriptType st, CastMemberID scriptId, int
+ 		if (obj->getMethod(_eventHandlerTypes[event]).type != VOIDSYM) {
+ 			g_director->getCurrentMovie()->_currentSpriteNum = channelId;
+ 			push(Datum(obj));
++			// Stop at our own call depth: this may be a nested event (e.g. endSprite
++			// fired from `go`), and must not run the outer handlers to completion.
++			int depth = _state->callstack.size();
+ 			LC::call(_eventHandlerTypes[event], 1, false);
+-			return execute();
++			return execute(depth);
+ 		} else {
++			// This behavior has no handler for the event, so it can't have
++			// consumed it: let it continue on to the next script.
++			_passEvent = true;
+ 			return true;
+ 		}
+ 	}
+@@ -832,10 +838,13 @@ bool Lingo::processEvent(LEvent event, ScriptType st, CastMemberID scriptId, int
+ 			nargs = 1;
+ 		}
+ 
++		int depth = _state->callstack.size();
+ 		LC::call(script->_eventHandlers[event], nargs, false);
+-		return execute();
++		return execute(depth);
+ 	} else {
+ 		debugC(9, kDebugEvents, "Lingo::processEvent(%s, %s, %s): no handler", _eventHandlerTypes[event], scriptType2str(st), scriptId.asString().c_str());
++		// No handler means the event wasn't consumed here
++		_passEvent = true;
+ 	}
+ 	return true;
+ }
+@@ -868,7 +877,12 @@ void Score::killScriptInstances(int frameNum) {
+ 		if (frameNum < channel->_startFrame || frameNum > channel->_endFrame) {
+ 			bool prevDis = _disableGoPlayUpdateStage;
+ 			_disableGoPlayUpdateStage = true;
++			// A pending freeze (set by `go`) belongs to the outer handler; don't let
++			// the nested endSprite execution consume it and swap the Lingo state.
++			bool prevFreeze = g_lingo->_freezeState;
++			g_lingo->_freezeState = false;
+ 			_movie->processEvent(kEventEndSprite, i);
++			g_lingo->_freezeState = prevFreeze;
+ 			_disableGoPlayUpdateStage = prevDis;
+ 
+ 			channel->_scriptInstanceList.clear();
+@@ -960,6 +974,11 @@ void Score::createScriptInstances(int frameNum) {
+ 		}
+ 	}
+ 
++	// Instantiate the behaviors of every new sprite first, and only then send
++	// beginSprite: Director lets a beginSprite handler look at the
++	// scriptInstanceList of any other sprite that starts in the same frame.
++	Common::Array<int> newChannels;
++
+ 	for (int i = 0; i < (int)_channels.size(); i++) {
+ 		Channel *channel = _channels[i];
+ 		Sprite *sprite = channel->_sprite;
+@@ -992,9 +1011,13 @@ void Score::createScriptInstances(int frameNum) {
+ 			channel->_scriptInstanceList.push_back(instance);
+ 		}
+ 
++		newChannels.push_back(i);
++	}
++
++	for (uint n = 0; n < newChannels.size(); n++) {
+ 		bool prevDis = _disableGoPlayUpdateStage;
+ 		_disableGoPlayUpdateStage = true;
+-		_movie->processEvent(kEventBeginSprite, i);
++		_movie->processEvent(kEventBeginSprite, newChannels[n]);
+ 		_disableGoPlayUpdateStage = prevDis;
+ 	}
+ }
+diff --git a/engines/director/lingo/lingo-funcs.cpp b/engines/director/lingo/lingo-funcs.cpp
+index 563125e7..721a87fc 100644
+--- a/engines/director/lingo/lingo-funcs.cpp
++++ b/engines/director/lingo/lingo-funcs.cpp
+@@ -164,6 +164,13 @@ void Lingo::func_play(Datum &frame, Datum &movie) {
+ 		return;
+ 	}
+ 
++	// `play frame sprite(n)` targets a Flash sprite (resume its timeline); it is
++	// not a movie jump. Treating it as one re-runs the whole frame lifecycle.
++	if (frame.type == SPRITEREF) {
++		debugC(1, kDebugLingoExec, "Lingo::func_play(): play on a sprite reference, not a frame jump");
++		return;
++	}
++
+ 	// play #done
+ 	if (frame.type == SYMBOL) {
+ 		if (!frame.u.s->equals("done")) {
+diff --git a/engines/director/lingo/lingo-the.cpp b/engines/director/lingo/lingo-the.cpp
+index 1ec91626..ae3f0c95 100644
+--- a/engines/director/lingo/lingo-the.cpp
++++ b/engines/director/lingo/lingo-the.cpp
+@@ -240,6 +240,13 @@ const TheEntityField fields[] = {
+ 	{ kTheSprite,	"stretch",		kTheStretch,	200 },// D2 p
+ 	{ kTheSprite,	"top",			kTheTop,		200 },// D2 p
+ 	{ kTheSprite,	"trails",		kTheTrails,		300 },//		D3.1 p
++	{ kTheSprite,	"rotation",	kTheRotation,	200 },
++	{ kTheSprite,	"viewPoint",	kTheViewPoint,	600 },
++	{ kTheSprite,	"viewH",		kTheViewH,		600 },
++	{ kTheSprite,	"viewV",		kTheViewV,		600 },
++	{ kTheSprite,	"viewScale",	kTheViewScale,	600 },
++	{ kTheSprite,	"originMode",	kTheOriginMode,	600 },
++	{ kTheSprite,	"static",		kTheStatic,		600 },
+ 	{ kTheSprite,	"tweened",		kTheTweened,	600 },//						D6 p
+ 	{ kTheSprite,	"type",			kTheType,		200 },// D2 p
+ 	{ kTheSprite,	"visibility",	kTheVisibility,	300 },//		D3.1 p
+@@ -282,6 +289,10 @@ const TheEntityField fields[] = {
+ 	{ kTheCast,		"controller",	kTheController,	300 },//		D3.1 p
+ 	{ kTheCast,		"crop",			kTheCrop,		400 },//				D4 p
+ 	{ kTheCast,		"digitalVideoType",kTheDigitalVideoType,500 },//			D5 p
++	{ kTheCast,		"viewPoint",	kTheViewPoint,	600 },
++	{ kTheCast,		"originMode",	kTheOriginMode,	600 },
++	{ kTheCast,		"static",		kTheStatic,		600 },
++	{ kTheCast,		"imageEnabled",	kTheImageEnabled,	600 },
+ 	{ kTheCast,		"directToStage",kTheDirectToStage,300 },//		D3.1 p
+ 	{ kTheCast,		"duration",		kTheDuration,	300 },//		D3.1 p
+ 	{ kTheCast,		"frameRate",	kTheFrameRate,	400 },//				D4 p
+@@ -366,6 +377,11 @@ const TheEntityField fields[] = {
+ 	{ kTheCast,		"interface",	kTheInterface,	500 },//					D5 p
+ 	{ kTheCast,		"mediaBusy",	kTheMediaBusy,	600 },//						D6 p
+ 
++	// SWA (Shockwave Audio) cast member fields
++	{ kTheCast,		"preLoadTime",	kThePreLoadTime,500 },//					D5 p
++	{ kTheCast,		"state",		kTheState,		500 },//					D5 p
++	{ kTheCast,		"URL",			kTheURL,		500 },//					D5 p
++
+ 	// Behavior (me) fields
+ 	{ kTheCast,		"spriteNum",	kTheSpriteNum,	600 },//						D6 p
+ 
+@@ -1764,9 +1780,11 @@ Datum Lingo::getTheSprite(Datum &id1, int field) {
+ 		d = (int)(sprite->_colorcode & 0x7);
+ 		break;
+ 	case kTheScriptInstanceList:
+-		warning("STUB: Getting the scriptInstanceList");
+-		d.type = PARRAY;
+-		d.u.parr = new PArray;
++		// A plain list of the behavior script instances attached to the sprite
++		d.type = ARRAY;
++		d.u.farr = new FArray;
++		for (auto &it : channel->_scriptInstanceList)
++			d.u.farr->arr.push_back(it);
+ 		break;
+ 	case kTheScriptNum:
+ 		if (g_director->getVersion() >= 600) {
+@@ -1803,6 +1821,20 @@ Datum Lingo::getTheSprite(Datum &id1, int field) {
+ 	case kTheTweened:	// D6
+ 		d = (sprite->_thickness & kTTweened) ? 1 : 0;
+ 		break;
++	case kTheRotation:
++		d = Datum((double)sprite->_rotation);
++		break;
++	case kTheViewPoint:
++	case kTheViewH:
++	case kTheViewV:
++	case kTheViewScale:
++	case kTheOriginMode:
++	case kTheStatic:
++		if (sprite->_cast && sprite->_cast->_type == kCastXtra)
++			d = sprite->_cast->getField(field);
++		else
++			d = Datum(0);
++		break;
+ 	case kTheVisibility:
+ 	case kTheVisible:
+ 		d = (channel->_visible ? 1 : 0);
+@@ -2074,6 +2106,11 @@ void Lingo::setTheSprite(Datum &id1, int field, Datum &d) {
+ 		if (!d.asInt()) {
+ 			// TODO: Properly reset sprite properties after puppet disabled.
+ 			sprite->_moveable = false;
++			if (sprite->_rotation != 0.0f) {
++				sprite->_rotation = 0.0f;
++				channel->setDirty();
++				channel->setNeedsDraw();
++			}
+ 		}
+ 		break;
+ 	case kTheRect:
+@@ -2091,7 +2128,13 @@ void Lingo::setTheSprite(Datum &id1, int field, Datum &d) {
+ 
+ 		break;
+ 	case kTheScriptInstanceList:
+-		warning("STUB: Setting the scriptInstanceList");
++		if (d.type == ARRAY) {
++			channel->_scriptInstanceList.clear();
++			for (auto &it : d.u.farr->arr)
++				channel->_scriptInstanceList.push_back(it);
++		} else {
++			warning("Lingo::setTheSprite(): scriptInstanceList expects a list, got %s", d.type2str());
++		}
+ 		break;
+ 	case kTheStartTime:
+ 		channel->_startTime = d.asInt();
+@@ -2121,6 +2164,24 @@ void Lingo::setTheSprite(Datum &id1, int field, Datum &d) {
+ 			channel->setDirty();
+ 		}
+ 		break;
++	case kTheRotation:
++		if (sprite->_rotation != (float)d.asFloat()) {
++			sprite->_rotation = (float)d.asFloat();
++			channel->setDirty();
++			channel->setNeedsDraw();
++		}
++		break;
++	case kTheViewPoint:
++	case kTheViewH:
++	case kTheViewV:
++	case kTheViewScale:
++	case kTheOriginMode:
++	case kTheStatic:
++		if (sprite->_cast && sprite->_cast->_type == kCastXtra) {
++			sprite->_cast->setField(field, d);
++			channel->setDirty();
++		}
++		break;
+ 	case kTheTweened: // D6
+ 		sprite->_thickness = (sprite->_thickness & ~kTTweened) | ((d.asInt() ? kTTweened : 0));
+ 		channel->setDirty();
+@@ -2756,6 +2817,9 @@ void Lingo::setObjectProp(Datum &obj, Common::String &propName, Datum &val) {
+ 
+ 		if (member->hasProp(propName)) {
+ 			member->setProp(propName, val);
++		} else if (member->_type == kCastXtra) {
++			// Unimplemented Xtra (e.g. QuickDraw 3D): ignore, so the game can carry on
++			warning("Lingo::setObjectProp(): STUB: unsupported Xtra member %s property '%s'", id.asString().c_str(), propName.c_str());
+ 		} else {
+ 			g_lingo->lingoError("Lingo::setObjectProp(): %s has no property '%s'", id.asString().c_str(), propName.c_str());
+ 		}
+diff --git a/engines/director/lingo/lingo-the.h b/engines/director/lingo/lingo-the.h
+index 81028b65..a86e5ab5 100644
+--- a/engines/director/lingo/lingo-the.h
++++ b/engines/director/lingo/lingo-the.h
+@@ -266,6 +266,7 @@ enum TheFieldType {
+ 	kThePausedAtStart,
+ 	kThePicture,
+ 	kThePreLoad,
++	kThePreLoadTime,
+ 	kThePreLoadMode,
+ 	kThePuppet,
+ 	kThePurgePriority,
+@@ -311,10 +312,20 @@ enum TheFieldType {
+ 	kTheTrails,
+ 	kTheTransitionType,
+ 	kTheTweened,
++	kTheRotation,
++	kTheViewH,
++	kTheViewV,
++	kTheViewScale,
++	kTheViewPoint,
++	kTheOriginMode,
++	kTheStatic,
++	kTheImageEnabled,
+ 	kTheType,
+ 	kTheVideo,
+ 	kTheVisibility,
+ 	kTheVisible,
++	kTheState,
++	kTheURL,
+ 	kTheVolume,
+ 	kTheWidth,
+ 	kTheWindowType,
+diff --git a/engines/director/lingo/lingo.cpp b/engines/director/lingo/lingo.cpp
+index 8da4c668..47fb1d35 100644
+--- a/engines/director/lingo/lingo.cpp
++++ b/engines/director/lingo/lingo.cpp
+@@ -1344,7 +1344,10 @@ Datum Datum::clone() const {
+ 	Datum result;
+ 	switch (type) {
+ 	case ARRAY:
+-		result.type = ARRAY;
++	case POINT:
++	case RECT:
++		// points and rects are value lists too; duplicating one must not alias the original
++		result.type = type;
+ 		result.u.farr = new FArray;
+ 		for (auto &it : u.farr->arr) {
+ 			result.u.farr->arr.push_back(it.clone());
+@@ -1803,6 +1806,35 @@ void Lingo::varAssign(const Datum &var, const Datum &value) {
+ 				return;
+ 			}
+ 			CastMember *member = movie->getCastMember(*var.u.cast);
++			if (!member && var.type == FIELDREF) {
++				// `put x into field N` creates the field when the slot is empty.
++				// Clone any existing text member as a template for the new one.
++				Cast *cast = movie->getCast(*var.u.cast);
++				CastMember *tmpl = nullptr;
++				if (cast) {
++					for (auto &it : *cast->_loadedCast) {
++						if (it._value && it._value->_type == kCastText) {
++							tmpl = it._value;
++							break;
++						}
++					}
++					if (!tmpl) {
++						for (auto &c : *movie->getCasts()) {
++							for (auto &it : *c._value->_loadedCast) {
++								if (it._value && it._value->_type == kCastText) {
++									tmpl = it._value;
++									break;
++								}
++							}
++							if (tmpl)
++								break;
++						}
++					}
++				}
++				CastMemberInfo newInfo;
++				if (cast && tmpl && cast->duplicateCastMember(tmpl, &newInfo, var.u.cast->member))
++					member = movie->getCastMember(*var.u.cast);
++			}
+ 			if (!member) {
+ 				warning("varAssign: Unknown %s", var.u.cast->asString().c_str());
+ 				return;
+diff --git a/engines/director/lingo/xtras-cast/flashxtra.cpp b/engines/director/lingo/xtras-cast/flashxtra.cpp
+new file mode 100644
+index 00000000..7f080c5f
+--- /dev/null
++++ b/engines/director/lingo/xtras-cast/flashxtra.cpp
+@@ -0,0 +1,1186 @@
++/* ScummVM - Graphic Adventure Engine
++ *
++ * ScummVM is the legal property of its developers, whose names
++ * are too numerous to list here. Please refer to the COPYRIGHT
++ * file distributed with this source distribution.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ *
++ */
++
++#include "common/algorithm.h"
++#include "common/debug.h"
++#include "common/file.h"
++#include "common/util.h"
++#include "common/hashmap.h"
++#include <math.h>
++
++#include "graphics/macgui/macwidget.h"
++#include "graphics/macgui/macwindowmanager.h"
++
++#include "director/director.h"
++#include "director/cast.h"
++#include "director/castmember/xtra.h"
++#include "director/channel.h"
++#include "director/score.h"
++#include "director/movie.h"
++#include "director/sprite.h"
++#include "director/lingo/lingo.h"
++#include "director/lingo/lingo-the.h"
++#include "director/lingo/xtras-cast/flashxtra.h"
++#include "director/window.h"
++
++namespace Director {
++
++namespace FlashXtra {
++
++CastMember *createCastMember(Cast *cast, uint16 castId, XtraCastMember *xtra) {
++	return new FlashXtraCastMember(cast, castId, *xtra);
++}
++
++// ---------------------------------------------------------------------------
++// Matrix
++// ---------------------------------------------------------------------------
++
++SWFMovie::Matrix SWFMovie::Matrix::operator*(const Matrix &o) const {
++	Matrix r;
++	r.a = a * o.a + c * o.b;
++	r.b = b * o.a + d * o.b;
++	r.c = a * o.c + c * o.d;
++	r.d = b * o.c + d * o.d;
++	r.tx = a * o.tx + c * o.ty + tx;
++	r.ty = b * o.tx + d * o.ty + ty;
++	return r;
++}
++
++SWFMovie::Matrix SWFMovie::Matrix::inverse() const {
++	Matrix r;
++	float det = a * d - b * c;
++	if (fabsf(det) < 1e-12f)
++		return r;
++	r.a = d / det;
++	r.b = -b / det;
++	r.c = -c / det;
++	r.d = a / det;
++	r.tx = -(r.a * tx + r.c * ty);
++	r.ty = -(r.b * tx + r.d * ty);
++	return r;
++}
++
++// ---------------------------------------------------------------------------
++// Bit reader
++// ---------------------------------------------------------------------------
++
++namespace {
++
++struct Reader {
++	const byte *data;
++	uint32 size;
++	uint32 pos;
++	uint32 bitPos;	// 0 = byte aligned
++	bool eof;
++
++	Reader(const byte *d, uint32 s) : data(d), size(s), pos(0), bitPos(0), eof(false) {}
++
++	void align() {
++		if (bitPos) {
++			bitPos = 0;
++			pos++;
++		}
++	}
++	byte u8() {
++		align();
++		if (pos >= size) {
++			eof = true;
++			return 0;
++		}
++		return data[pos++];
++	}
++	uint16 u16() {
++		uint16 lo = u8();
++		uint16 hi = u8();
++		return lo | (hi << 8);
++	}
++	int16 s16() { return (int16)u16(); }
++	uint32 u32() {
++		uint32 lo = u16();
++		uint32 hi = u16();
++		return lo | (hi << 16);
++	}
++	uint32 ub(int n) {
++		uint32 v = 0;
++		for (int i = 0; i < n; i++) {
++			if (pos >= size) {
++				eof = true;
++				return v << (n - i);
++			}
++			int bit = (data[pos] >> (7 - bitPos)) & 1;
++			v = (v << 1) | bit;
++			if (++bitPos == 8) {
++				bitPos = 0;
++				pos++;
++			}
++		}
++		return v;
++	}
++	int32 sb(int n) {
++		if (n == 0)
++			return 0;
++		uint32 v = ub(n);
++		if (v & (1u << (n - 1)))
++			return (int32)(v | ~((1u << n) - 1));
++		return (int32)v;
++	}
++	float fb(int n) { return sb(n) / 65536.0f; }
++	bool atEnd() const { return eof || pos >= size; }
++};
++
++SWFMovie::Matrix readMatrix(Reader &r) {
++	SWFMovie::Matrix m;
++	r.align();
++	if (r.ub(1)) {
++		int n = r.ub(5);
++		m.a = r.fb(n);
++		m.d = r.fb(n);
++	}
++	if (r.ub(1)) {
++		int n = r.ub(5);
++		m.b = r.fb(n);
++		m.c = r.fb(n);
++	}
++	int n = r.ub(5);
++	m.tx = (float)r.sb(n);
++	m.ty = (float)r.sb(n);
++	r.align();
++	return m;
++}
++
++void readRect(Reader &r, int &xmin, int &xmax, int &ymin, int &ymax) {
++	r.align();
++	int n = r.ub(5);
++	xmin = r.sb(n);
++	xmax = r.sb(n);
++	ymin = r.sb(n);
++	ymax = r.sb(n);
++	r.align();
++}
++
++SWFMovie::ColorXform readCxform(Reader &r) {
++	SWFMovie::ColorXform c;
++	r.align();
++	bool hasAdd = r.ub(1);
++	bool hasMult = r.ub(1);
++	int n = r.ub(4);
++	if (hasMult) {
++		c.mr = r.sb(n) / 256.0f;
++		c.mg = r.sb(n) / 256.0f;
++		c.mb = r.sb(n) / 256.0f;
++	}
++	if (hasAdd) {
++		c.ar = (float)r.sb(n);
++		c.ag = (float)r.sb(n);
++		c.ab = (float)r.sb(n);
++	}
++	r.align();
++	return c;
++}
++
++void readFillStyles(Reader &r, Common::Array<SWFMovie::FillStyle> &fills, bool shape2) {
++	int count = r.u8();
++	if (count == 0xFF && shape2)
++		count = r.u16();
++	for (int i = 0; i < count && !r.atEnd(); i++) {
++		SWFMovie::FillStyle fs;
++		int type = r.u8();
++		if (type == 0x00) {
++			fs.type = 0;
++			fs.r = r.u8();
++			fs.g = r.u8();
++			fs.b = r.u8();
++		} else if (type == 0x10 || type == 0x12) {
++			fs.type = (type == 0x10) ? 1 : 2;
++			fs.matrix = readMatrix(r);
++			int n = r.u8();
++			for (int j = 0; j < n; j++) {
++				fs.ratios.push_back(r.u8());
++				fs.colors.push_back(r.u8());
++				fs.colors.push_back(r.u8());
++				fs.colors.push_back(r.u8());
++			}
++		} else if (type >= 0x40 && type <= 0x43) {
++			fs.type = 3;
++			r.u16();	// bitmap id
++			fs.matrix = readMatrix(r);
++			fs.r = fs.g = fs.b = 128;
++		} else {
++			r.eof = true;
++		}
++		fills.push_back(fs);
++	}
++}
++
++void readLineStyles(Reader &r, Common::Array<SWFMovie::LineStyle> &lines, bool shape2) {
++	int count = r.u8();
++	if (count == 0xFF && shape2)
++		count = r.u16();
++	for (int i = 0; i < count && !r.atEnd(); i++) {
++		SWFMovie::LineStyle ls;
++		ls.width = r.u16();
++		ls.r = r.u8();
++		ls.g = r.u8();
++		ls.b = r.u8();
++		lines.push_back(ls);
++	}
++}
++
++// Reads shape records (after the style arrays when withStyles is true).
++void readShapeRecords(Reader &r, SWFMovie::Shape &shape, bool withStyles, bool shape2, int implicitFill) {
++	int fillBits = r.ub(4);
++	int lineBits = r.ub(4);
++	float x = 0, y = 0;
++	int fill0 = implicitFill, fill1 = implicitFill, line = 0;
++	int fillBase = 0, lineBase = 0;
++	(void)withStyles;
++
++	while (!r.atEnd()) {
++		if (r.ub(1) == 0) {
++			int flags = r.ub(5);
++			if (flags == 0)
++				break;
++			bool newStyles = flags & 16;
++			bool lineStyle = flags & 8;
++			bool fillStyle1 = flags & 4;
++			bool fillStyle0 = flags & 2;
++			bool moveTo = flags & 1;
++			if (moveTo) {
++				int n = r.ub(5);
++				x = (float)r.sb(n);
++				y = (float)r.sb(n);
++			}
++			if (fillStyle0) {
++				int v = r.ub(fillBits);
++				fill0 = v ? v + fillBase : 0;
++			}
++			if (fillStyle1) {
++				int v = r.ub(fillBits);
++				fill1 = v ? v + fillBase : 0;
++			}
++			if (lineStyle) {
++				int v = r.ub(lineBits);
++				line = v ? v + lineBase : 0;
++			}
++			if (newStyles && shape2) {
++				fillBase = shape.fills.size();
++				lineBase = shape.lines.size();
++				readFillStyles(r, shape.fills, true);
++				readLineStyles(r, shape.lines, true);
++				fillBits = r.ub(4);
++				lineBits = r.ub(4);
++			}
++		} else {
++			SWFMovie::Edge e;
++			e.fill0 = fill0;
++			e.fill1 = fill1;
++			e.line = line;
++			e.x0 = x;
++			e.y0 = y;
++			if (r.ub(1)) {	// straight
++				int n = r.ub(4) + 2;
++				float dx = 0, dy = 0;
++				if (r.ub(1)) {
++					dx = (float)r.sb(n);
++					dy = (float)r.sb(n);
++				} else if (r.ub(1)) {
++					dy = (float)r.sb(n);
++				} else {
++					dx = (float)r.sb(n);
++				}
++				x += dx;
++				y += dy;
++				e.curve = false;
++				e.cx = e.cy = 0;
++			} else {
++				int n = r.ub(4) + 2;
++				float cdx = (float)r.sb(n);
++				float cdy = (float)r.sb(n);
++				float adx = (float)r.sb(n);
++				float ady = (float)r.sb(n);
++				e.cx = x + cdx;
++				e.cy = y + cdy;
++				x = e.cx + adx;
++				y = e.cy + ady;
++				e.curve = true;
++			}
++			e.x1 = x;
++			e.y1 = y;
++			shape.edges.push_back(e);
++		}
++	}
++	r.align();
++}
++
++} // End of anonymous namespace
++
++// ---------------------------------------------------------------------------
++// Parsing
++// ---------------------------------------------------------------------------
++
++bool SWFMovie::load(const byte *data, uint32 size) {
++	if (size < 12 || data[0] != 'F' || data[1] != 'W' || data[2] != 'S')
++		return false;
++
++	Reader r(data, size);
++	r.pos = 8;
++	readRect(r, _xmin, _xmax, _ymin, _ymax);
++	r.u16();	// frame rate (8.8)
++	_frameCount = r.u16();
++
++	DisplayList current;
++
++	while (!r.atEnd()) {
++		uint16 hdr = r.u16();
++		int tag = hdr >> 6;
++		uint32 len = hdr & 63;
++		if (len == 63)
++			len = r.u32();
++		if (r.pos + len > size)
++			break;
++
++		Reader t(data + r.pos, len);
++		r.pos += len;
++
++		if (tag == 0) {
++			break;
++		} else if (tag == 1) {		// ShowFrame
++			_frames.push_back(current);
++		} else if (tag == 2 || tag == 22) {	// DefineShape, DefineShape2
++			bool shape2 = (tag == 22);
++			int id = t.u16();
++			int x0, x1, y0, y1;
++			readRect(t, x0, x1, y0, y1);
++			Shape s;
++			readFillStyles(t, s.fills, shape2);
++			readLineStyles(t, s.lines, shape2);
++			readShapeRecords(t, s, true, shape2, 0);
++			_shapes[id] = s;
++		} else if (tag == 9) {		// SetBackgroundColor
++			_bgR = t.u8();
++			_bgG = t.u8();
++			_bgB = t.u8();
++		} else if (tag == 4) {		// PlaceObject
++			Placement p;
++			p.id = t.u16();
++			p.depth = t.u16();
++			p.matrix = readMatrix(t);
++			if (!t.atEnd())
++				p.cxform = readCxform(t);
++			// replace anything already at this depth
++			bool replaced = false;
++			for (uint i = 0; i < current.size(); i++) {
++				if (current[i].depth == p.depth) {
++					current[i] = p;
++					replaced = true;
++					break;
++				}
++			}
++			if (!replaced)
++				current.push_back(p);
++		} else if (tag == 5) {		// RemoveObject
++			t.u16();
++			int depth = t.u16();
++			for (uint i = 0; i < current.size(); i++) {
++				if (current[i].depth == depth) {
++					current.remove_at(i);
++					break;
++				}
++			}
++		} else if (tag == 10) {		// DefineFont
++			int id = t.u16();
++			uint32 base = t.pos;
++			int first = t.u16();
++			int count = first / 2;
++			Common::Array<int> offsets;
++			offsets.push_back(first);
++			for (int i = 1; i < count; i++)
++				offsets.push_back(t.u16());
++			Common::Array<Shape> glyphs;
++			for (int i = 0; i < count; i++) {
++				Reader g(t.data, t.size);
++				g.pos = base + offsets[i];
++				Shape gs;
++				if (g.pos < t.size)
++					readShapeRecords(g, gs, false, false, 1);
++				glyphs.push_back(gs);
++			}
++			_fontGlyphs[id] = glyphs;
++		} else if (tag == 11) {		// DefineText
++			int id = t.u16();
++			int x0, x1, y0, y1;
++			readRect(t, x0, x1, y0, y1);
++			Text text;
++			text.matrix = readMatrix(t);
++			int glyphBits = t.u8();
++			int advBits = t.u8();
++			int font = 0;
++			float height = 0, tx = 0, ty = 0;
++			byte cr = 0, cg = 0, cb = 0;
++			while (!t.atEnd()) {
++				int b = t.u8();
++				if (b == 0)
++					break;
++				if (b & 0x80) {
++					bool hasFont = b & 8, hasColor = b & 4, hasY = b & 2, hasX = b & 1;
++					if (hasFont)
++						font = t.u16();
++					if (hasColor) {
++						cr = t.u8();
++						cg = t.u8();
++						cb = t.u8();
++					}
++					if (hasX)
++						tx = (float)t.s16();
++					if (hasY)
++						ty = (float)t.s16();
++					if (hasFont)
++						height = (float)t.u16();
++				} else {
++					int n = b & 0x7f;
++					for (int i = 0; i < n; i++) {
++						TextGlyph g;
++						g.glyph = t.ub(glyphBits);
++						int adv = t.sb(advBits);
++						g.font = font;
++						g.x = tx;
++						g.y = ty;
++						g.height = height;
++						g.r = cr;
++						g.g = cg;
++						g.b = cb;
++						text.glyphs.push_back(g);
++						tx += adv;
++					}
++					t.align();
++				}
++			}
++			_texts[id] = text;
++		}
++		// everything else (bitmaps, buttons, sounds, actions) is ignored
++	}
++
++	return !_frames.empty() || !_shapes.empty();
++}
++
++// ---------------------------------------------------------------------------
++// Rasterizer
++// ---------------------------------------------------------------------------
++
++class Rasterizer {
++public:
++	struct Seg {
++		float x0, y0, x1, y1;
++	};
++
++	Rasterizer(int w, int h) : _w(w), _h(h) {}
++
++	// Fill the polygon set (non-zero winding) with a solid colour or a gradient.
++	void fill(const Common::Array<Seg> &segs, const SWFMovie::FillStyle &fs, const SWFMovie::Matrix &toDevice,
++			const SWFMovie::ColorXform &cx, Common::Array<byte> &rgba);
++
++	static void flatten(const SWFMovie::Edge &e, const SWFMovie::Matrix &m, Common::Array<Seg> &out, bool reverse);
++
++private:
++	int _w, _h;
++};
++
++void Rasterizer::flatten(const SWFMovie::Edge &e, const SWFMovie::Matrix &m, Common::Array<Seg> &out, bool reverse) {
++	float px, py, qx, qy;
++	m.apply(e.x0, e.y0, px, py);
++	m.apply(e.x1, e.y1, qx, qy);
++
++	Common::Array<Seg> tmp;
++	if (!e.curve) {
++		Seg s = { px, py, qx, qy };
++		tmp.push_back(s);
++	} else {
++		float cx, cy;
++		m.apply(e.cx, e.cy, cx, cy);
++		float dev = fabsf(px - 2 * cx + qx) + fabsf(py - 2 * cy + qy);
++		int steps = CLIP((int)(sqrtf(dev) * 1.5f) + 1, 2, 24);
++		float lx = px, ly = py;
++		for (int i = 1; i <= steps; i++) {
++			float t = (float)i / steps;
++			float u = 1 - t;
++			float x = u * u * px + 2 * u * t * cx + t * t * qx;
++			float y = u * u * py + 2 * u * t * cy + t * t * qy;
++			Seg s = { lx, ly, x, y };
++			tmp.push_back(s);
++			lx = x;
++			ly = y;
++		}
++	}
++
++	if (reverse) {
++		for (int i = (int)tmp.size() - 1; i >= 0; i--) {
++			Seg s = { tmp[i].x1, tmp[i].y1, tmp[i].x0, tmp[i].y0 };
++			out.push_back(s);
++		}
++	} else {
++		for (uint i = 0; i < tmp.size(); i++)
++			out.push_back(tmp[i]);
++	}
++}
++
++static void gradientColor(const SWFMovie::FillStyle &fs, float t, float &r, float &g, float &b) {
++	t = CLIP(t, 0.0f, 1.0f);
++	int n = fs.ratios.size();
++	if (n == 0) {
++		r = g = b = 0;
++		return;
++	}
++	float pos = t * 255.0f;
++	if (pos <= fs.ratios[0] || n == 1) {
++		r = fs.colors[0]; g = fs.colors[1]; b = fs.colors[2];
++		return;
++	}
++	for (int i = 1; i < n; i++) {
++		if (pos <= fs.ratios[i]) {
++			float span = (float)(fs.ratios[i] - fs.ratios[i - 1]);
++			float f = span > 0 ? (pos - fs.ratios[i - 1]) / span : 1.0f;
++			r = fs.colors[(i - 1) * 3 + 0] * (1 - f) + fs.colors[i * 3 + 0] * f;
++			g = fs.colors[(i - 1) * 3 + 1] * (1 - f) + fs.colors[i * 3 + 1] * f;
++			b = fs.colors[(i - 1) * 3 + 2] * (1 - f) + fs.colors[i * 3 + 2] * f;
++			return;
++		}
++	}
++	r = fs.colors[(n - 1) * 3 + 0]; g = fs.colors[(n - 1) * 3 + 1]; b = fs.colors[(n - 1) * 3 + 2];
++}
++
++void Rasterizer::fill(const Common::Array<Seg> &segs, const SWFMovie::FillStyle &fs, const SWFMovie::Matrix &toDevice,
++		const SWFMovie::ColorXform &cx, Common::Array<byte> &rgba) {
++	if (segs.empty())
++		return;
++
++	// bounds
++	float minY = 1e9f, maxY = -1e9f;
++	for (uint i = 0; i < segs.size(); i++) {
++		minY = MIN(minY, MIN(segs[i].y0, segs[i].y1));
++		maxY = MAX(maxY, MAX(segs[i].y0, segs[i].y1));
++	}
++	int y0 = MAX(0, (int)floorf(minY));
++	int y1 = MIN(_h - 1, (int)floorf(maxY));
++
++	// gradient setup: gradient space is a 32768-twip square centred on the origin
++	SWFMovie::Matrix inv;
++	if (fs.type == 1 || fs.type == 2)
++		inv = (toDevice * fs.matrix).inverse();
++
++	const int SUB = 4;
++	Common::Array<float> cover(_w);
++
++	struct Crossing {
++		float x;
++		int dir;
++	};
++	Common::Array<Crossing> xs;
++
++	for (int y = y0; y <= y1; y++) {
++		for (int i = 0; i < _w; i++)
++			cover[i] = 0;
++		bool any = false;
++
++		for (int s = 0; s < SUB; s++) {
++			float sy = y + (s + 0.5f) / SUB;
++			xs.clear();
++			for (uint i = 0; i < segs.size(); i++) {
++				const Seg &sg = segs[i];
++				float ya = sg.y0, yb = sg.y1;
++				if (ya == yb)
++					continue;
++				int dir = 1;
++				float xa = sg.x0, xb = sg.x1;
++				if (ya > yb) {
++					SWAP(ya, yb);
++					SWAP(xa, xb);
++					dir = -1;
++				}
++				if (sy < ya || sy >= yb)
++					continue;
++				float t = (sy - ya) / (yb - ya);
++				Crossing c = { xa + t * (xb - xa), dir };
++				xs.push_back(c);
++			}
++			if (xs.size() < 2)
++				continue;
++			Common::sort(xs.begin(), xs.end(), [](const Crossing &a, const Crossing &b) { return a.x < b.x; });
++
++			int wind = 0;
++			for (uint i = 0; i + 1 < xs.size(); i++) {
++				wind += xs[i].dir;
++				if (wind == 0)
++					continue;
++				float xa = xs[i].x, xb = xs[i + 1].x;
++				if (xb <= 0 || xa >= _w)
++					continue;
++				xa = MAX(xa, 0.0f);
++				xb = MIN(xb, (float)_w);
++				int ia = (int)floorf(xa);
++				int ib = (int)floorf(xb);
++				if (ia == ib) {
++					cover[ia] += (xb - xa) / SUB;
++				} else {
++					cover[ia] += (ia + 1 - xa) / SUB;
++					for (int x = ia + 1; x < ib; x++)
++						cover[x] += 1.0f / SUB;
++					if (ib < _w)
++						cover[ib] += (xb - ib) / SUB;
++				}
++				any = true;
++			}
++		}
++		if (!any)
++			continue;
++
++		for (int x = 0; x < _w; x++) {
++			float c = cover[x];
++			if (c <= 0.001f)
++				continue;
++			if (c > 1.0f)
++				c = 1.0f;
++
++			float r, g, b;
++			if (fs.type == 1 || fs.type == 2) {
++				float gx, gy;
++				inv.apply(x + 0.5f, y + 0.5f, gx, gy);
++				float t;
++				if (fs.type == 1)
++					t = (gx + 16384.0f) / 32768.0f;
++				else
++					t = sqrtf(gx * gx + gy * gy) / 16384.0f;
++				gradientColor(fs, t, r, g, b);
++			} else {
++				r = fs.r;
++				g = fs.g;
++				b = fs.b;
++			}
++			r = CLIP(r * cx.mr + cx.ar, 0.0f, 255.0f);
++			g = CLIP(g * cx.mg + cx.ag, 0.0f, 255.0f);
++			b = CLIP(b * cx.mb + cx.ab, 0.0f, 255.0f);
++
++			byte *px = &rgba[(y * _w + x) * 4];
++			px[0] = (byte)(px[0] + (r - px[0]) * c + 0.5f);
++			px[1] = (byte)(px[1] + (g - px[1]) * c + 0.5f);
++			px[2] = (byte)(px[2] + (b - px[2]) * c + 0.5f);
++			px[3] = 255;
++		}
++	}
++}
++
++// Draw one shape instance
++static void drawShape(const SWFMovie::Shape &shape, const SWFMovie::Matrix &m, const SWFMovie::ColorXform &cx,
++		Rasterizer &rz, Common::Array<byte> &rgba, float scale, int implicitFillColor,
++		const SWFMovie::FillStyle *override) {
++	// fills
++	for (uint f = 0; f < shape.fills.size() || (override && f == 0); f++) {
++		Common::Array<Rasterizer::Seg> segs;
++		int idx = f + 1;
++		for (uint i = 0; i < shape.edges.size(); i++) {
++			const SWFMovie::Edge &e = shape.edges[i];
++			if (e.fill1 == idx)
++				Rasterizer::flatten(e, m, segs, false);
++			if (e.fill0 == idx)
++				Rasterizer::flatten(e, m, segs, true);
++		}
++		if (segs.empty())
++			continue;
++		const SWFMovie::FillStyle &fs = override ? *override : shape.fills[f];
++		rz.fill(segs, fs, m, cx, rgba);
++		if (override)
++			break;
++	}
++	(void)implicitFillColor;
++
++	// strokes
++	for (uint l = 0; l < shape.lines.size(); l++) {
++		int idx = l + 1;
++		Common::Array<Rasterizer::Seg> quads;	// emitted as 4 segments per quad
++		float hw = MAX(shape.lines[l].width * scale, 1.0f) * 0.5f;
++		for (uint i = 0; i < shape.edges.size(); i++) {
++			const SWFMovie::Edge &e = shape.edges[i];
++			if (e.line != idx)
++				continue;
++			Common::Array<Rasterizer::Seg> pieces;
++			Rasterizer::flatten(e, m, pieces, false);
++			for (uint k = 0; k < pieces.size(); k++) {
++				const Rasterizer::Seg &s = pieces[k];
++				float dx = s.x1 - s.x0, dy = s.y1 - s.y0;
++				float len = sqrtf(dx * dx + dy * dy);
++				if (len < 1e-4f)
++					continue;
++				float ux = dx / len, uy = dy / len;
++				float nx = -uy * hw, ny = ux * hw;
++				float ex = ux * hw * 0.5f, ey = uy * hw * 0.5f;
++				float ax = s.x0 - ex, ay = s.y0 - ey;
++				float bx = s.x1 + ex, by = s.y1 + ey;
++				// consistent orientation: (a+n) -> (b+n) -> (b-n) -> (a-n)
++				Rasterizer::Seg q0 = { ax + nx, ay + ny, bx + nx, by + ny };
++				Rasterizer::Seg q1 = { bx + nx, by + ny, bx - nx, by - ny };
++				Rasterizer::Seg q2 = { bx - nx, by - ny, ax - nx, ay - ny };
++				Rasterizer::Seg q3 = { ax - nx, ay - ny, ax + nx, ay + ny };
++				quads.push_back(q0);
++				quads.push_back(q1);
++				quads.push_back(q2);
++				quads.push_back(q3);
++			}
++		}
++		if (quads.empty())
++			continue;
++		SWFMovie::FillStyle ls;
++		ls.type = 0;
++		ls.r = shape.lines[l].r;
++		ls.g = shape.lines[l].g;
++		ls.b = shape.lines[l].b;
++		// Each quad has the same orientation, so non-zero winding gives their union.
++		rz.fill(quads, ls, m, cx, rgba);
++	}
++}
++
++void SWFMovie::render(int frame, int width, int height, Common::Array<byte> &rgba, const Matrix *stageOverride) const {
++	rgba.resize(width * height * 4);
++	for (int i = 0; i < width * height; i++) {
++		rgba[i * 4 + 0] = _bgR;
++		rgba[i * 4 + 1] = _bgG;
++		rgba[i * 4 + 2] = _bgB;
++		rgba[i * 4 + 3] = 0;
++	}
++	if (_frames.empty() || width <= 0 || height <= 0)
++		return;
++
++	frame = CLIP(frame, 0, (int)_frames.size() - 1);
++	const DisplayList &dl = _frames[frame];
++
++	float sw = (float)(_xmax - _xmin);
++	float sh = (float)(_ymax - _ymin);
++	if (sw <= 0 || sh <= 0)
++		return;
++
++	Matrix stage;
++	stage.a = width / sw;
++	stage.d = height / sh;
++	stage.tx = -_xmin * stage.a;
++	stage.ty = -_ymin * stage.d;
++	if (stageOverride)
++		stage = *stageOverride;
++	float scale = (stage.a + stage.d) * 0.5f;
++
++	// depth order
++	Common::Array<Placement> sorted = dl;
++	Common::sort(sorted.begin(), sorted.end(), [](const Placement &a, const Placement &b) { return a.depth < b.depth; });
++
++	Rasterizer rz(width, height);
++
++	for (uint i = 0; i < sorted.size(); i++) {
++		const Placement &p = sorted[i];
++		Matrix m = stage * p.matrix;
++
++		if (_shapes.contains(p.id)) {
++			drawShape(_shapes.getVal(p.id), m, p.cxform, rz, rgba, scale, 0, nullptr);
++		} else if (_texts.contains(p.id)) {
++			const Text &t = _texts.getVal(p.id);
++			Matrix tm = m * t.matrix;
++			for (uint g = 0; g < t.glyphs.size(); g++) {
++				const TextGlyph &tg = t.glyphs[g];
++				if (!_fontGlyphs.contains(tg.font))
++					continue;
++				const Common::Array<Shape> &glyphs = _fontGlyphs.getVal(tg.font);
++				if (tg.glyph < 0 || tg.glyph >= (int)glyphs.size())
++					continue;
++				Matrix gm;
++				float gs = tg.height / 1024.0f;
++				gm.a = gs;
++				gm.d = gs;
++				gm.tx = tg.x;
++				gm.ty = tg.y;
++				FillStyle fs;
++				fs.type = 0;
++				fs.r = tg.r;
++				fs.g = tg.g;
++				fs.b = tg.b;
++				drawShape(glyphs[tg.glyph], tm * gm, p.cxform, rz, rgba, scale, 0, &fs);
++			}
++		}
++	}
++}
++
++} // End of namespace FlashXtra
++
++// ---------------------------------------------------------------------------
++// Cast member
++// ---------------------------------------------------------------------------
++
++FlashXtraCastMember::FlashXtraCastMember(Cast *cast, uint16 castId, XtraCastMember &source)
++		: CastMember(cast, castId) {
++	_type = kCastXtra;
++	_valid = false;
++	_frame = 0;
++	_viewSet = false;
++	_viewH = _viewV = 0;
++	_viewScale = 100;
++	_originCenter = true;
++	_regX = _regY = 0;
++	_mask = nullptr;
++	const Common::Array<byte> &xd = source.getXtraData();
++	if (xd.size() >= 144) {
++		auto rdf = [&](int idx) {
++			uint32 v = (xd[idx * 4] << 24) | (xd[idx * 4 + 1] << 16) | (xd[idx * 4 + 2] << 8) | xd[idx * 4 + 3];
++			float f;
++			memcpy(&f, &v, 4);
++			return f;
++		};
++		auto rdi = [&](int idx) {
++			return (int)((xd[idx * 4] << 24) | (xd[idx * 4 + 1] << 16) | (xd[idx * 4 + 2] << 8) | xd[idx * 4 + 3]);
++		};
++		(void)rdf;
++		if (rdi(8) == 1 && rdi(13) > 0 && rdi(14) > 0) {
++			// registration at the center of the member (160,120 is just Flash's placeholder)
++			_regX = rdi(14) / 2.0f;
++			_regY = rdi(13) / 2.0f;
++		} else {
++			_regY = (float)rdi(9);
++			_regX = (float)rdi(10);
++		}
++		_viewH = _regX;
++		_viewV = _regY;
++	}
++}
++
++FlashXtraCastMember::FlashXtraCastMember(Cast *cast, uint16 castId, FlashXtraCastMember &source)
++		: CastMember(cast, castId) {
++	_type = kCastXtra;
++	_initialRect = source._initialRect;
++	_boundingRect = source._boundingRect;
++	_movie = source._movie;
++	_valid = source._valid;
++	_frame = source._frame;
++	_viewSet = source._viewSet;
++	_viewH = source._viewH;
++	_viewV = source._viewV;
++	_viewScale = source._viewScale;
++	_originCenter = source._originCenter;
++	_mask = nullptr;
++	_regX = source._regX;
++	_regY = source._regY;
++	_regUnit = source._regUnit;
++	_loaded = source._loaded;
++	if (cast == source._cast)
++		_children = source._children;
++}
++
++FlashXtraCastMember::~FlashXtraCastMember() {
++	delete _mask;
++}
++
++void FlashXtraCastMember::load() {
++	if (_loaded)
++		return;
++	_loaded = true;
++
++	for (auto &it : _children) {
++		if (it.tag != MKTAG('X', 'M', 'E', 'D'))
++			continue;
++		if (!_cast->getArchive()->hasResource(it.tag, it.index)) {
++			warning("FlashXtraCastMember::load(): XMED %d not found", it.index);
++			break;
++		}
++		Common::SeekableReadStreamEndian *r = _cast->getArchive()->getResource(it.tag, it.index);
++		Common::Array<byte> data(r->size());
++		r->read(data.data(), r->size());
++		delete r;
++
++		// find the SWF signature inside the chunk
++		for (uint i = 0; i + 12 < data.size(); i++) {
++			if (data[i] == 'F' && data[i + 1] == 'W' && data[i + 2] == 'S') {
++				_valid = _movie.load(&data[i], data.size() - i);
++				break;
++			}
++		}
++		if (_valid) {
++			Common::Rect stage = _movie.getStageRect();
++			if (_initialRect.isEmpty())
++				_initialRect = stage;
++			debugC(3, kDebugImages, "FlashXtraCastMember::load(): cast %d: %dx%d, %d frames", _castId, stage.width(), stage.height(), _movie.getFrameCount());
++		} else {
++			warning("FlashXtraCastMember::load(): cast %d: could not decode SWF", _castId);
++		}
++		break;
++	}
++}
++
++Graphics::MacWidget *FlashXtraCastMember::createWidget(Common::Rect &bbox, Channel *channel, SpriteType spriteType) {
++	if (!bbox.width() || !bbox.height())
++		return nullptr;
++
++	load();
++
++	Graphics::MacWidget *widget = new Graphics::MacWidget(g_director->getCurrentWindow()->getMacWindow(),
++			bbox.left, bbox.top, bbox.width(), bbox.height(), g_director->_wm, false);
++	Graphics::ManagedSurface *surf = widget->getSurface();
++
++	if (!_valid) {
++		surf->fillRect(Common::Rect(surf->w, surf->h), g_director->_wm->_colorWhite);
++		return widget;
++	}
++
++	debugC(3, kDebugImages, "flash cast %d init %dx%d stage %dx%d reg %g,%g bbox %d,%d %dx%d ch=%d", _castId, _initialRect.width(), _initialRect.height(), stageW(), stageH(), _regX,_regY, bbox.left, bbox.top, bbox.width(), bbox.height(), channel && channel->_sprite ? (int)channel->_sprite->_castId.member : -1);
++	Common::Array<byte> rgba;
++	// Flash sprites default to scaleMode #showAll: content keeps its aspect
++	// ratio and is centered in the sprite rect.
++	float iw = (float)MAX((int16)1, stageW());
++	float ih = (float)MAX((int16)1, stageH());
++	float r = MIN(bbox.width() / iw, bbox.height() / ih);
++	float ox = (bbox.width() - iw * r) / 2.0f;
++	float oy = (bbox.height() - ih * r) / 2.0f;
++	FlashXtra::SWFMovie::Matrix m;
++	float s = _viewSet ? 100.0f / MAX(_viewScale, 1.0f) : 1.0f;
++	float vh = _viewSet ? _viewH : _regX;
++	float vv = _viewSet ? _viewV : _regY;
++	m.a = s * r / 20.0f;
++	m.d = s * r / 20.0f;
++	m.tx = ox + _regX * r - vh * s * r;
++	m.ty = oy + _regY * r - vv * s * r;
++	debugC(3, kDebugImages, "FlashXtraCastMember: cast %d bbox %dx%d view (%g,%g) scale %g", _castId, bbox.width(), bbox.height(), vh, vv, s);
++	_movie.render(_frame, bbox.width(), bbox.height(), rgba, &m);
++
++	delete _mask;
++	_mask = new Graphics::ManagedSurface(bbox.width(), bbox.height(), Graphics::PixelFormat::createFormatCLUT8());
++	for (int y = 0; y < bbox.height(); y++)
++		for (int x = 0; x < bbox.width(); x++)
++			*((byte *)_mask->getBasePtr(x, y)) = rgba[(y * bbox.width() + x) * 4 + 3] ? 1 : 0;
++
++	const Graphics::PixelFormat &fmt = surf->format;
++	// cache nearest-colour lookups for indexed output
++	Common::HashMap<uint32, uint32> cache;
++	for (int y = 0; y < bbox.height(); y++) {
++		for (int x = 0; x < bbox.width(); x++) {
++			const byte *p = &rgba[(y * bbox.width() + x) * 4];
++			uint32 color;
++			if (fmt.bytesPerPixel == 1) {
++				uint32 key = (p[0] << 16) | (p[1] << 8) | p[2];
++				if (cache.contains(key)) {
++					color = cache.getVal(key);
++				} else {
++					color = g_director->_wm->findBestColor(p[0], p[1], p[2]);
++					cache[key] = color;
++				}
++			} else {
++				color = fmt.RGBToColor(p[0], p[1], p[2]);
++			}
++			if (fmt.bytesPerPixel == 1)
++				*((byte *)surf->getBasePtr(x, y)) = (byte)color;
++			else if (fmt.bytesPerPixel == 2)
++				*((uint16 *)surf->getBasePtr(x, y)) = (uint16)color;
++			else
++				*((uint32 *)surf->getBasePtr(x, y)) = color;
++		}
++	}
++
++	return widget;
++}
++
++bool FlashXtraCastMember::hasField(int field) {
++	switch (field) {
++	case kTheFrame:
++	case kTheViewH:
++	case kTheViewV:
++	case kTheViewScale:
++	case kTheViewPoint:
++	case kTheOriginMode:
++	case kTheStatic:
++	case kTheImageEnabled:
++	case kTheRegPoint:
++		return true;
++	default:
++		break;
++	}
++	return CastMember::hasField(field);
++}
++
++Datum FlashXtraCastMember::getField(int field) {
++	Datum d;
++
++	switch (field) {
++	case kTheCastType:
++	case kTheType:
++		d = Common::String("flash");
++		d.type = SYMBOL;
++		break;
++	case kTheFrame:
++		d = _frame + 1;
++		break;
++	case kTheViewPoint:
++		d.type = POINT;
++		d.u.farr = new FArray;
++		d.u.farr->arr.push_back(Datum((double)_viewH));
++		d.u.farr->arr.push_back(Datum((double)_viewV));
++		break;
++	case kTheViewH:
++		d = (double)_viewH;
++		break;
++	case kTheViewV:
++		d = (double)_viewV;
++		break;
++	case kTheViewScale:
++		d = (double)_viewScale;
++		break;
++	case kTheOriginMode:
++		d = Common::String(_originCenter ? "center" : "topLeft");
++		d.type = SYMBOL;
++		break;
++	case kTheStatic:
++	case kTheImageEnabled:
++		d = 1;
++		break;
++	case kTheRegPoint:
++		d.type = POINT;
++		d.u.farr = new FArray;
++		d.u.farr->arr.push_back((double)(_regX / _regUnit));
++		d.u.farr->arr.push_back((double)(_regY / _regUnit));
++		break;
++	default:
++		d = CastMember::getField(field);
++		break;
++	}
++
++	return d;
++}
++
++void FlashXtraCastMember::setField(int field, const Datum &d) {
++	debugC(3, kDebugImages, "FlashXtraCastMember::setField(%d) cast %d = %s", field, _castId, d.asString(true).c_str());
++	switch (field) {
++	case kTheRegPoint:
++		if (d.type == POINT && d.u.farr->arr.size() >= 2) {
++			Score *score = g_director->getCurrentMovie()->getScore();
++			if (score)
++				score->invalidateRectsForMember(this);
++			_regX = (float)d.u.farr->arr[0].asFloat() * _regUnit;
++			_regY = (float)d.u.farr->arr[1].asFloat() * _regUnit;
++			setModified(true);
++		}
++		return;
++	case kTheFrame:
++		_frame = MAX(0, d.asInt() - 1);
++		setModified(true);
++		return;
++	case kTheViewH:
++		_viewH = d.asFloat();
++		_viewSet = true;
++		setModified(true);
++		return;
++	case kTheViewV:
++		_viewV = d.asFloat();
++		_viewSet = true;
++		setModified(true);
++		return;
++	case kTheViewScale:
++		_viewScale = d.asFloat();
++		_viewSet = true;
++		setModified(true);
++		return;
++	case kTheViewPoint:
++		if (d.type == POINT && d.u.farr->arr.size() >= 2) {
++			_viewH = d.u.farr->arr[0].asFloat();
++			_viewV = d.u.farr->arr[1].asFloat();
++			_viewSet = true;
++			setModified(true);
++		}
++		return;
++	case kTheOriginMode:
++		_originCenter = !d.asString().equalsIgnoreCase("topLeft");
++		setModified(true);
++		return;
++	case kTheStatic:
++	case kTheImageEnabled:
++		return;
++	default:
++		break;
++	}
++
++	CastMember::setField(field, d);
++}
++
++// Convert between stage and Flash movie coordinates for a sprite displaying this member.
++// bbox: the sprite's on-stage rectangle.
++void FlashXtraCastMember::stageToFlash(const Common::Rect &bbox, float sx, float sy, float &fx, float &fy) {
++	float s = 100.0f / MAX(_viewScale, 1.0f);
++	float rx = bbox.width() / (float)MAX((int16)1, _initialRect.width());
++	float ry = bbox.height() / (float)MAX((int16)1, _initialRect.height());
++	float dx = sx - bbox.left, dy = sy - bbox.top;
++	fx = _viewH + (dx / rx - _regX) / s;
++	fy = _viewV + (dy / ry - _regY) / s;
++}
++
++void FlashXtraCastMember::flashToStage(const Common::Rect &bbox, float fx, float fy, float &sx, float &sy) {
++	float s = 100.0f / MAX(_viewScale, 1.0f);
++	float rx = bbox.width() / (float)MAX((int16)1, _initialRect.width());
++	float ry = bbox.height() / (float)MAX((int16)1, _initialRect.height());
++	sx = bbox.left + (_regX + (fx - _viewH) * s) * rx;
++	sy = bbox.top + (_regY + (fy - _viewV) * s) * ry;
++}
++
++Common::String FlashXtraCastMember::formatInfo() {
++	return Common::String::format("initialRect: %dx%d, frames: %d", _initialRect.width(), _initialRect.height(), _movie.getFrameCount());
++}
++
++// `the defaultRect of member` sets/reads the size the member gets when placed on the stage.
++bool FlashXtraCastMember::hasProp(const Common::String &propName) {
++	if (propName.equalsIgnoreCase("defaultRect"))
++		return true;
++	return CastMember::hasProp(propName);
++}
++
++Datum FlashXtraCastMember::getProp(const Common::String &propName) {
++	if (propName.equalsIgnoreCase("defaultRect")) {
++		load();
++		Datum d;
++		d.type = RECT;
++		d.u.farr = new FArray;
++		d.u.farr->arr.push_back(Datum(0));
++		d.u.farr->arr.push_back(Datum(0));
++		d.u.farr->arr.push_back(Datum((int)_initialRect.width()));
++		d.u.farr->arr.push_back(Datum((int)_initialRect.height()));
++		return d;
++	}
++	return CastMember::getProp(propName);
++}
++
++void FlashXtraCastMember::setProp(const Common::String &propName, const Datum &value, bool force) {
++	if (propName.equalsIgnoreCase("defaultRect")) {
++		if (value.type == RECT && value.u.farr->arr.size() >= 4) {
++			int w = value.u.farr->arr[2].asInt() - value.u.farr->arr[0].asInt();
++			int h = value.u.farr->arr[3].asInt() - value.u.farr->arr[1].asInt();
++			if (w > 0 && h > 0) {
++				Score *score = g_director->getCurrentMovie()->getScore();
++				if (score)
++					score->invalidateRectsForMember(this);
++				_initialRect = Common::Rect(w, h);
++				float iw = (float)MAX((int16)1, stageW()), ih = (float)MAX((int16)1, stageH());
++				_regUnit = 1.0f / MIN(w / iw, h / ih);
++				setModified(true);
++			}
++		}
++		return;
++	}
++	CastMember::setProp(propName, value, force);
++}
++
++} // End of namespace Director
+diff --git a/engines/director/lingo/xtras-cast/flashxtra.h b/engines/director/lingo/xtras-cast/flashxtra.h
+new file mode 100644
+index 00000000..d168e48b
+--- /dev/null
++++ b/engines/director/lingo/xtras-cast/flashxtra.h
+@@ -0,0 +1,182 @@
++/* ScummVM - Graphic Adventure Engine
++ *
++ * ScummVM is the legal property of its developers, whose names
++ * are too numerous to list here. Please refer to the COPYRIGHT
++ * file distributed with this source distribution.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ *
++ */
++
++#ifndef DIRECTOR_LINGO_XTRAS_CAST_FLASHXTRA_H
++#define DIRECTOR_LINGO_XTRAS_CAST_FLASHXTRA_H
++
++#include "common/array.h"
++#include "common/hashmap.h"
++#include "common/rect.h"
++#include "common/str.h"
++
++#include "director/castmember/castmember.h"
++
++namespace Director {
++
++class XtraCastMember;
++
++namespace FlashXtra {
++
++CastMember *createCastMember(Cast *cast, uint16 castId, XtraCastMember *xtra);
++
++// A tiny SWF (version 1-3) movie: shapes, text and a timeline of
++// place/remove tags. Enough for the vector art shipped with early
++// Director 6 titles that used the Flash Asset Xtra.
++class SWFMovie {
++public:
++	struct Matrix {
++		float a, b, c, d, tx, ty;
++		Matrix() : a(1), b(0), c(0), d(1), tx(0), ty(0) {}
++		Matrix operator*(const Matrix &o) const;	// apply o first, then this
++		Matrix inverse() const;
++		void apply(float x, float y, float &ox, float &oy) const {
++			ox = a * x + c * y + tx;
++			oy = b * x + d * y + ty;
++		}
++	};
++
++	struct ColorXform {
++		float mr, mg, mb, ar, ag, ab;
++		ColorXform() : mr(1), mg(1), mb(1), ar(0), ag(0), ab(0) {}
++	};
++
++	struct FillStyle {
++		int type;			// 0 solid, 1 linear, 2 radial, 3 bitmap
++		byte r, g, b, a;
++		Matrix matrix;
++		Common::Array<byte> ratios;
++		Common::Array<byte> colors;	// rgb triplets
++		FillStyle() : type(0), r(0), g(0), b(0), a(255) {}
++	};
++
++	struct LineStyle {
++		float width;		// twips
++		byte r, g, b;
++		LineStyle() : width(20), r(0), g(0), b(0) {}
++	};
++
++	struct Edge {
++		float x0, y0, cx, cy, x1, y1;
++		bool curve;
++		int fill0, fill1, line;
++	};
++
++	struct Shape {
++		Common::Array<FillStyle> fills;
++		Common::Array<LineStyle> lines;
++		Common::Array<Edge> edges;
++	};
++
++	struct TextGlyph {
++		int font;
++		int glyph;
++		float x, y, height;
++		byte r, g, b;
++	};
++
++	struct Text {
++		Matrix matrix;
++		Common::Array<TextGlyph> glyphs;
++	};
++
++	struct Placement {
++		int id;
++		int depth;
++		Matrix matrix;
++		ColorXform cxform;
++	};
++
++	SWFMovie() : _xmin(0), _ymin(0), _xmax(0), _ymax(0), _bgR(255), _bgG(255), _bgB(255), _frameCount(0) {}
++
++	bool load(const byte *data, uint32 size);
++
++	int getFrameCount() const { return _frameCount; }
++	Common::Rect getStageRect() const { return Common::Rect((_xmax - _xmin + 19) / 20, (_ymax - _ymin + 19) / 20); }
++
++	// Render a frame (0-based) scaled to width x height; pixels are RGBA8.
++	void render(int frame, int width, int height, Common::Array<byte> &rgba, const Matrix *stageOverride = nullptr) const;
++
++private:
++	friend class Rasterizer;
++
++	typedef Common::Array<Placement> DisplayList;
++
++	int _xmin, _ymin, _xmax, _ymax;
++	byte _bgR, _bgG, _bgB;
++	int _frameCount;
++
++	Common::HashMap<int, Shape> _shapes;
++	Common::HashMap<int, Text> _texts;
++	Common::HashMap<int, Shape> _fonts;			// unused
++	Common::HashMap<int, Common::Array<Shape> > _fontGlyphs;
++	Common::Array<DisplayList> _frames;			// cumulative display list after each ShowFrame
++};
++
++} // End of namespace FlashXtra
++
++class FlashXtraCastMember : public CastMember {
++public:
++	FlashXtraCastMember(Cast *cast, uint16 castId, XtraCastMember &source);
++	FlashXtraCastMember(Cast *cast, uint16 castId, FlashXtraCastMember &source);
++
++	CastMember *duplicate(Cast *cast, uint16 castId) override { return (CastMember *)(new FlashXtraCastMember(cast, castId, *this)); }
++
++	void load() override;
++	Graphics::ManagedSurface *getFlashMask() override { return _mask; }
++	Common::Point getRegistrationOffset() override { return Common::Point((int)_regX, (int)_regY); }
++	Common::Point getRegistrationOffset(int16 w, int16 h) override {
++		float iw = (float)MAX((int16)1, stageW()), ih = (float)MAX((int16)1, stageH());
++		float r = MIN(w / iw, h / ih);
++		return Common::Point((int)((w - iw * r) / 2.0f + _regX * r), (int)((h - ih * r) / 2.0f + _regY * r));
++	}
++
++	int16 stageW() { load(); int16 w = _movie.getStageRect().width(); return w > 0 ? w : _initialRect.width(); }
++	int16 stageH() { load(); int16 h = _movie.getStageRect().height(); return h > 0 ? h : _initialRect.height(); }
++
++	Graphics::MacWidget *createWidget(Common::Rect &bbox, Channel *channel, SpriteType spriteType) override;
++
++	bool hasField(int field) override;
++	Datum getField(int field) override;
++	void setField(int field, const Datum &value) override;
++	bool hasProp(const Common::String &propName) override;
++	Datum getProp(const Common::String &propName) override;
++	void setProp(const Common::String &propName, const Datum &value, bool force = false) override;
++
++	Common::String formatInfo() override;
++	bool isFlash() const override { return true; }
++	void stageToFlash(const Common::Rect &bbox, float sx, float sy, float &fx, float &fy);
++	void flashToStage(const Common::Rect &bbox, float fx, float fy, float &sx, float &sy);
++
++	FlashXtra::SWFMovie _movie;
++	bool _valid;
++	int _frame;
++	bool _viewSet;
++	float _viewH, _viewV, _viewScale;
++	bool _originCenter;
++	float _regX, _regY;	// registration in Flash stage units
++	float _regUnit = 1.0f;	// stage units per 'default rect' unit (regPoint/defaultRect are in rect units)
++	Graphics::ManagedSurface *_mask;
++	~FlashXtraCastMember();
++};
++
++} // End of namespace Director
++
++#endif
+diff --git a/engines/director/lingo/xtras-cast/swaxtra.cpp b/engines/director/lingo/xtras-cast/swaxtra.cpp
+new file mode 100644
+index 00000000..354327a1
+--- /dev/null
++++ b/engines/director/lingo/xtras-cast/swaxtra.cpp
+@@ -0,0 +1,232 @@
++/* ScummVM - Graphic Adventure Engine
++ *
++ * ScummVM is the legal property of its developers, whose names
++ * are too numerous to list here. Please refer to the COPYRIGHT
++ * file distributed with this source distribution.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ *
++ */
++
++#include "common/macresman.h"
++#include "common/substream.h"
++#include "audio/audiostream.h"
++#include "audio/decoders/mp3.h"
++
++#include "director/director.h"
++#include "director/cast.h"
++#include "director/movie.h"
++#include "director/sound.h"
++#include "director/util.h"
++#include "director/window.h"
++#include "director/castmember/xtra.h"
++#include "director/lingo/lingo.h"
++#include "director/lingo/lingo-the.h"
++#include "director/lingo/xtras-cast/swaxtra.h"
++
++namespace Director {
++
++// SWA streams play on their own sound channel
++static const int kSWASoundChannel = 4;
++
++namespace SWAXtra {
++
++CastMember *createCastMember(Cast *cast, uint16 castId, XtraCastMember *xtra) {
++	return new SWAXtraCastMember(cast, castId, *xtra);
++}
++
++SWAXtraCastMember *fromDatum(const Datum &d) {
++	if (d.type != CASTREF || !d.u.cast)
++		return nullptr;
++
++	Movie *movie = g_director->getCurrentMovie();
++	if (!movie)
++		return nullptr;
++
++	CastMember *member = movie->getCastMember(*d.u.cast);
++	if (!member || !member->isSWA())
++		return nullptr;
++
++	return static_cast<SWAXtraCastMember *>(member);
++}
++
++} // End of namespace SWAXtra
++
++SWAXtraCastMember::SWAXtraCastMember(Cast *cast, uint16 castId, XtraCastMember &source)
++		: CastMember(cast, castId), _state(kStateStopped), _preLoadTime(0), _playing(false), _fileOk(false) {
++	_type = kCastXtra;
++}
++
++SWAXtraCastMember::SWAXtraCastMember(Cast *cast, uint16 castId, SWAXtraCastMember &source)
++		: CastMember(cast, castId), _state(kStateStopped), _preLoadTime(source._preLoadTime), _playing(false), _fileOk(false) {
++	_type = kCastXtra;
++	_url = source._url;
++	if (cast == source._cast)
++		_children = source._children;
++}
++
++SWAXtraCastMember::~SWAXtraCastMember() {
++	if (_playing)
++		stop();
++}
++
++bool SWAXtraCastMember::hasField(int field) {
++	switch (field) {
++	case kTheURL:
++	case kTheState:
++	case kThePreLoadTime:
++		return true;
++	default:
++		break;
++	}
++	return CastMember::hasField(field);
++}
++
++Datum SWAXtraCastMember::getField(int field) {
++	switch (field) {
++	case kTheURL:
++		return Datum(_url);
++	case kTheState:
++		return Datum(getState());
++	case kThePreLoadTime:
++		return Datum(_preLoadTime);
++	default:
++		break;
++	}
++	return CastMember::getField(field);
++}
++
++void SWAXtraCastMember::setField(int field, const Datum &d) {
++	switch (field) {
++	case kTheURL:
++		if (_playing)
++			stop();
++		_url = d.asString();
++		_state = kStateStopped;
++		_fileOk = false;
++		debugC(2, kDebugLoading, "SWAXtraCastMember: url of member %d set to '%s'", _castId, _url.c_str());
++		return;
++	case kThePreLoadTime:
++		_preLoadTime = d.asInt();
++		return;
++	case kTheState:
++		// read-only
++		return;
++	default:
++		break;
++	}
++	CastMember::setField(field, d);
++}
++
++Common::String SWAXtraCastMember::formatInfo() {
++	return Common::String::format("SWA Xtra: url: '%s', state: %d", _url.c_str(), _state);
++}
++
++// Opens the .swa file and returns a stream positioned on the MPEG data
++Common::SeekableReadStream *SWAXtraCastMember::openStream() {
++	if (_url.empty())
++		return nullptr;
++
++	// The URL is an absolute path as seen by the game (e.g. "C:\\Media\\Audio\\x.swa"),
++	// so resolve it against the game directory the same way Lingo file paths are.
++	Common::Path path = findAbsolutePath(_url);
++	Common::SeekableReadStream *file = Common::MacResManager::openFileOrDataFork(path);
++	if (!file) {
++		path = findAudioPath(_url);
++		file = Common::MacResManager::openFileOrDataFork(path);
++	}
++	if (!file) {
++		warning("SWAXtraCastMember: failed to open '%s' (resolved to '%s')", _url.c_str(), path.toString().c_str());
++		return nullptr;
++	}
++
++	if (file->size() < 8) {
++		delete file;
++		return nullptr;
++	}
++
++	// The first big-endian word is the length of the SWA header
++	uint32 headerLen = file->readUint32BE();
++	if (headerLen < 8 || headerLen >= (uint32)file->size()) {
++		warning("SWAXtraCastMember: unexpected header length %u in '%s'", headerLen, _url.c_str());
++		delete file;
++		return nullptr;
++	}
++
++	return new Common::SeekableSubReadStream(file, headerLen, file->size(), DisposeAfterUse::YES);
++}
++
++void SWAXtraCastMember::preLoadBuffer() {
++	if (_playing)
++		return;
++
++	Common::SeekableReadStream *s = openStream();
++	_fileOk = s != nullptr;
++	delete s;
++
++	_state = _fileOk ? kStatePreloaded : kStateError;
++}
++
++void SWAXtraCastMember::play() {
++	DirectorSound *sound = g_director->getCurrentWindow()->getSoundManager();
++	if (!sound)
++		return;
++
++	Common::SeekableReadStream *s = openStream();
++	if (!s) {
++		_state = kStateError;
++		return;
++	}
++
++#ifdef USE_MAD
++	Audio::SeekableAudioStream *audio = Audio::makeMP3Stream(s, DisposeAfterUse::YES);
++	if (!audio) {
++		warning("SWAXtraCastMember: could not decode '%s'", _url.c_str());
++		_state = kStateError;
++		return;
++	}
++
++	sound->playStream(*audio, kSWASoundChannel);
++	_playing = true;
++	_state = kStatePlaying;
++#else
++	warning("STUB: SWAXtraCastMember::play(): ScummVM was built without MP3 support, cannot play '%s'", _url.c_str());
++	delete s;
++	_state = kStateError;
++#endif
++}
++
++void SWAXtraCastMember::stop() {
++	if (_playing) {
++		DirectorSound *sound = g_director->getCurrentWindow()->getSoundManager();
++		if (sound)
++			sound->stopSound(kSWASoundChannel);
++	}
++	_playing = false;
++	_state = kStateStopped;
++}
++
++int SWAXtraCastMember::getState() {
++	if (_playing) {
++		DirectorSound *sound = g_director->getCurrentWindow()->getSoundManager();
++		if (sound && sound->isChannelActive(kSWASoundChannel))
++			return kStatePlaying;
++		// the stream finished (or another sound took the channel)
++		_playing = false;
++		_state = kStateDone;
++	}
++	return _state;
++}
++
++} // End of namespace Director
+diff --git a/engines/director/lingo/xtras-cast/swaxtra.h b/engines/director/lingo/xtras-cast/swaxtra.h
+new file mode 100644
+index 00000000..243bf26b
+--- /dev/null
++++ b/engines/director/lingo/xtras-cast/swaxtra.h
+@@ -0,0 +1,89 @@
++/* ScummVM - Graphic Adventure Engine
++ *
++ * ScummVM is the legal property of its developers, whose names
++ * are too numerous to list here. Please refer to the COPYRIGHT
++ * file distributed with this source distribution.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ *
++ */
++
++#ifndef DIRECTOR_LINGO_XTRAS_CAST_SWAXTRA_H
++#define DIRECTOR_LINGO_XTRAS_CAST_SWAXTRA_H
++
++#include "director/castmember/castmember.h"
++
++namespace Director {
++
++class XtraCastMember;
++
++// Shockwave Audio (SWA) streaming cast member.
++//
++// An .swa file is a small Macromedia header (the first big-endian 32-bit
++// word is the header length, typically 0x140) followed by a plain MPEG audio
++// stream. Lingo drives the member with `the URL`, `the state`,
++// `preLoadBuffer`, `play` and `stop`.
++class SWAXtraCastMember : public CastMember {
++public:
++	// `the state of member` values, as documented for SWA
++	enum State {
++		kStateStopped = 0,
++		kStatePreloading = 1,
++		kStatePreloaded = 2,
++		kStatePlaying = 3,
++		kStatePaused = 4,
++		kStateDone = 5,
++		kStateError = 9
++	};
++
++	SWAXtraCastMember(Cast *cast, uint16 castId, XtraCastMember &source);
++	SWAXtraCastMember(Cast *cast, uint16 castId, SWAXtraCastMember &source);
++	~SWAXtraCastMember() override;
++
++	CastMember *duplicate(Cast *cast, uint16 castId) override { return (CastMember *)(new SWAXtraCastMember(cast, castId, *this)); }
++
++	bool isSWA() const override { return true; }
++
++	bool hasField(int field) override;
++	Datum getField(int field) override;
++	void setField(int field, const Datum &value) override;
++
++	Common::String formatInfo() override;
++
++	void preLoadBuffer();
++	void play();
++	void stop();
++	int getState();
++
++private:
++	Common::SeekableReadStream *openStream();
++
++	Common::String _url;
++	int _state;
++	int _preLoadTime;
++	bool _playing;
++	bool _fileOk;
++};
++
++namespace SWAXtra {
++
++CastMember *createCastMember(Cast *cast, uint16 castId, XtraCastMember *xtra);
++// Returns the SWA member a `member x` Datum refers to, or nullptr
++SWAXtraCastMember *fromDatum(const Datum &d);
++
++} // End of namespace SWAXtra
++
++} // End of namespace Director
++
++#endif
+diff --git a/engines/director/module.mk b/engines/director/module.mk
+index 28550729..1b578c26 100644
+--- a/engines/director/module.mk
++++ b/engines/director/module.mk
+@@ -193,7 +193,9 @@ MODULE_OBJS = \
+ 	lingo/xlibs/x/xwin.o \
+ 	lingo/xlibs/y/yasix.o \
+ 	lingo/xtras-cast/cursorxtra.o \
++	lingo/xtras-cast/swaxtra.o \
+ 	lingo/xtras-cast/textxtra.o \
++	lingo/xtras-cast/flashxtra.o \
+ 	lingo/xtras/a/audio.o \
+ 	lingo/xtras/b/border.o \
+ 	lingo/xtras/b/budapi.o \
+diff --git a/engines/director/picture.h b/engines/director/picture.h
+index db4c1a05..f7366c17 100644
+--- a/engines/director/picture.h
++++ b/engines/director/picture.h
+@@ -47,7 +47,6 @@ struct Picture {
+ 	Picture(Image::ImageDecoder &img);
+ 	Picture(Picture &picture);
+ 	~Picture();
+-private:
+ 	void copyPalette(const byte *src, int numColors);
+ };
+ 
+diff --git a/engines/director/sprite.cpp b/engines/director/sprite.cpp
+index cd001b88..027f66f7 100644
+--- a/engines/director/sprite.cpp
++++ b/engines/director/sprite.cpp
+@@ -19,6 +19,7 @@
+  *
+  */
+ 
++#include <math.h>
+ #include "graphics/macgui/macwidget.h"
+ 
+ #include "director/director.h"
+@@ -61,6 +62,7 @@ void Sprite::reset() {
+ 	_inkData = 0;
+ 	_ink = kInkTypeCopy;
+ 	_trails = false;
++	_rotation = 0;
+ 
+ 	if (_matte)
+ 		delete _matte;
+@@ -115,6 +117,7 @@ Sprite& Sprite::operator=(const Sprite &sprite) {
+ 	_inkData = sprite._inkData;
+ 	_ink = sprite._ink;
+ 	_trails = sprite._trails;
++	_rotation = sprite._rotation;
+ 
+ 	_cast = sprite._cast;
+ 	if (_cast)
+@@ -521,6 +524,21 @@ Common::Rect Sprite::getBbox(bool unstretched) {
+ 	// Now we move the rect to the correct spot.
+ 	Common::Point startPos = _startPoint;
+ 	result.translate(startPos.x, startPos.y);
++	if (_rotation != 0.0f && !unstretched) {
++		// Rotate about the registration point; return the bounding box.
++		float th = _rotation * 0.01745329252f;
++		float cs = cosf(th), sn = sinf(th);
++		float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
++		for (int i = 0; i < 4; i++) {
++			float x = ((i & 1) ? result.right : result.left) - startPos.x;
++			float y = ((i & 2) ? result.bottom : result.top) - startPos.y;
++			float rx = startPos.x + x * cs - y * sn;
++			float ry = startPos.y + x * sn + y * cs;
++			minX = MIN(minX, rx); maxX = MAX(maxX, rx);
++			minY = MIN(minY, ry); maxY = MAX(maxY, ry);
++		}
++		result = Common::Rect((int)floorf(minX + 0.001f), (int)floorf(minY + 0.001f), (int)ceilf(maxX - 0.001f), (int)ceilf(maxY - 0.001f));
++	}
+ 	return result;
+ 
+ }
+diff --git a/engines/director/sprite.h b/engines/director/sprite.h
+index ab13f38f..e32116ea 100644
+--- a/engines/director/sprite.h
++++ b/engines/director/sprite.h
+@@ -137,6 +137,7 @@ public:
+ 	void setHeight(int h);
+ 
+ 	Common::Rect getBbox(bool unstretched);
++	Common::Point getRegPoint() const { return _startPoint; }
+ 	void setBbox(int l, int t, int r, int b);
+ 
+ 	Common::Point getPosition();
+@@ -164,6 +165,7 @@ public:
+ 	byte _inkData;
+ 	InkType _ink;
+ 	bool _trails;
++	float _rotation;
+ 
+ 	CastMemberID _castId;
+ 	uint16 _pattern;
+diff --git a/engines/director/util.cpp b/engines/director/util.cpp
+index c4fa2d0e..fec5d637 100644
+--- a/engines/director/util.cpp
++++ b/engines/director/util.cpp
+@@ -1396,9 +1396,10 @@ int charToNum(Common::u32char_type_t ch) {
+ 
+ Common::u32char_type_t numToChar(int num) {
+ 	Common::String encodedCh;
+-	while (num) {
+-		encodedCh.insertChar((char)(num & 0xFF), 0);
+-		num >>= 8;
++	uint32 unum = (uint32)num;	// unsigned: a negative number would never reach 0
++	while (unum) {
++		encodedCh.insertChar((char)(unum & 0xFF), 0);
++		unum >>= 8;
+ 	}
+ 	Common::U32String str = encodedCh.decode(g_director->getPlatformEncoding());
+ 	return str.lastChar();
+diff --git a/engines/director/window.cpp b/engines/director/window.cpp
+index 1fb728f3..99b52e2b 100644
+--- a/engines/director/window.cpp
++++ b/engines/director/window.cpp
+@@ -275,6 +275,12 @@ bool Window::render(bool forceRedraw, Graphics::ManagedSurface *blitTo) {
+ 		Channel *chan = score->_channels[i];
+ 		if (!chan->_needsDraw && !forceRedraw)
+ 			continue;
++		// A channel that was hidden when last drawn and still is has nothing to
++		// paint or erase; redrawing the stack beneath it every frame is pure cost.
++		if (!forceRedraw && !chan->_visible && chan->_lastRenderedHidden) {
++			chan->_needsDraw = false;
++			continue;
++		}
+ 		Common::Rect bbox = chan->getBbox();
+ 
+ 		debugC(7, kDebugImages, "Window::render(): drawing channel %d", (int)i);
+@@ -286,6 +292,7 @@ bool Window::render(bool forceRedraw, Graphics::ManagedSurface *blitTo) {
+ 		chan->_needsDraw = false;
+ 		chan->_lastRenderedBbox = bbox;
+ 		chan->_lastTrail = chan->isTrail();
++		chan->_lastRenderedHidden = !chan->_visible;
+ 	}
+ 
+ 	Common::List<Common::Rect> &dirtyRects = _window->getDirtyRectList();

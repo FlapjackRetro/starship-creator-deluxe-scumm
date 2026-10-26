@@ -156,6 +156,9 @@ public:
 	bool hasField(int field) override;
 	Datum getField(int field) override;
 	void setField(int field, const Datum &value) override;
+	bool hasProp(const Common::String &propName) override;
+	Datum getProp(const Common::String &propName) override;
+	void setProp(const Common::String &propName, const Datum &value, bool force = false) override;
 
 	Common::String formatInfo() override;
 	bool isFlash() const override { return true; }
@@ -168,7 +171,8 @@ public:
 	bool _viewSet;
 	float _viewH, _viewV, _viewScale;
 	bool _originCenter;
-	float _regX, _regY;
+	float _regX, _regY;	// registration in Flash stage units
+	float _regUnit = 1.0f;	// stage units per 'default rect' unit (regPoint/defaultRect are in rect units)
 	Graphics::ManagedSurface *_mask;
 	~FlashXtraCastMember();
 };
